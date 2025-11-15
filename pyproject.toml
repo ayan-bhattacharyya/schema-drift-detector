@@ -1,0 +1,31 @@
+[project]
+name = "schema_drift_detector"
+version = "0.1.0"
+description = "schema_drift_detector using crewAI"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "crewai[tools]==1.4.1",
+    "Flask>=2.0",
+    "pandas>=1.5",
+    "neo4j>=5.7.0",
+    "python-dotenv>=1.0",
+    "requests>=2.28",
+    "google-generativeai>=0.3.2",
+    "google-genai>=0.3.3"
+]
+
+[project.scripts]
+schema_drift_detector = "schema_drift_detector.main:run"
+run_crew = "schema_drift_detector.main:run"
+train = "schema_drift_detector.main:train"
+replay = "schema_drift_detector.main:replay"
+test = "schema_drift_detector.main:test"
+run_with_trigger = "schema_drift_detector.main:run_with_trigger"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "crew"
