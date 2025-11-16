@@ -1,17 +1,189 @@
-research_task:
-  description: >
-    Conduct a thorough research about {topic}
-    Make sure you find any interesting and relevant information given
-    the current year is {current_year}.
-  expected_output: >
-    A list with 10 bullet points of the most relevant information about {topic}
-  agent: researcher
+tasks:
+  - task_name: orchestrate_check_schema_drift
+    description: >
+      Top-level flow invoked by pipelines / API callers. Accepts pipeline id and options,
+      calls source identification, then conditionally calls the appropriate crawler(s),
+      persists snapshots, runs drift detection, generates healing (if needed), and
+      notifies operators per policy. Returns a compact decision object.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "pipeline": "<pipeline_name_or_id>",
+        "decision": "<continue|pause|manual_review|auto_heal>",
+        "drift_detected": <bool>,
+        "severity": "<info|warning|critical>",
+        "snapshot_ids": ["<snapshot_id>", ...],
+        "healing": { /* as returned by healer_agent */ } | null,
+        "notification": { "sent": <bool>, "notification_id": "<id>" } | null
+      }
+    agent: orchestrator_agent
+    steps:
+      - identify_sources
+      - for_each source in response.sources:
+          - if source.type == "db": crawl_database
+          - if source.type == "api": crawl_api
+          - if source.type == "csv": crawl_csv
+      - persist_snapshots
+      - detect_drift
+      - if drift and (auto_heal_allowed or options.auto_heal): generate_healing
+      - if drift and notify_on_breaking (or severity == "critical"): notify_operator
+      - finalize_decision
 
-reporting_task:
-  description: >
-    Review the context you got and expand each topic into a full section for a report.
-    Make sure the report is detailed and contains any and all relevant information.
-  expected_output: >
-    A fully fledged report with the main topics, each with a full section of information.
-    Formatted as markdown without '```'
-  agent: reporting_analyst
+  - task_name: identify_sources
+    description: >
+      Query the GraphDB integration/catalog to resolve authoritative source(s), entity mappings,
+      and policy metadata for the pipeline identifier.
+    expected_output: |
+      {
+        "pipeline": "<pipeline_name_or_id>",
+        "sources": [
+          { "source_id": "<id>", "type": "<db|api|csv>", "entity": "<entity_name>", "metadata_ref": "<neo4j_node_id_or_props>" },
+          ...
+        ],
+        "policies": { "auto_heal_allowed": <bool>, "notify_rules": { ... } }
+      }
+    agent: source_schema_identifier
+
+  - task_name: crawl_database
+    description: >
+      Use DB system catalogs / information_schema to build a canonical schema snapshot
+      for the named table/entity. Must not read data rows or sample values.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "source_id": "<source_id>",
+        "entity": "<table_name>",
+        "snapshot": {
+          "source_id": "<source_id>",
+          "entity": "<table_name>",
+          "schema": {
+            "fields": [
+              { "name": "<col>", "type": "<type>", "nullable": <bool>, "constraints": { ... } },
+              ...
+            ],
+            "version_meta": { "created_by":"database_crawler_agent", "timestamp":"<ts>" }
+          }
+        }
+      }
+    agent: database_crawler_agent
+
+  - task_name: crawl_api
+    description: >
+      Parse OpenAPI/Swagger/GraphQL specs (from contract ref in metadata) and return a canonical contract snapshot.
+      Must not invoke endpoints to sample responses.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "source_id": "<source_id>",
+        "entity": "<resource_or_schema_name>",
+        "snapshot": {
+          "source_id": "<source_id>",
+          "entity": "<resource_or_schema_name>",
+          "schema": {
+            "endpoints": [ ... ],
+            "models": { "<model_name>": { "fields": [ { "name":"<f>", "type":"<t>" }, ... ] } },
+            "version_meta": { "created_by":"api_crawler_agent", "timestamp":"<ts>" }
+          }
+        }
+      }
+    agent: api_crawler_agent
+
+  - task_name: crawl_csv
+    description: >
+      Inspect CSV/flat-file headers and object metadata (not contents) to build a canonical schema snapshot.
+      Must not read or persist data rows or sample values.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "source_id": "<source_id>",
+        "entity": "<logical_name>",
+        "snapshot": {
+          "source_id": "<source_id>",
+          "entity": "<logical_name>",
+          "schema": {
+            "fields": [
+              { "name":"<col>", "type":"<inferred_type|string>", "nullable": <bool>, "hints": { ... } },
+              ...
+            ],
+            "version_meta": { "created_by":"csv_crawler_agent", "timestamp":"<ts>" }
+          }
+        }
+      }
+    agent: csv_crawler_agent
+
+  - task_name: persist_snapshots
+    description: >
+      Persist one or more canonical snapshots into the GraphDB as a versioned snapshot.
+      Validate snapshots to ensure they contain only metadata (no PII or sample values).
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "snapshot_ids": [ "<snapshot_id1>", "<snapshot_id2>", ... ],
+        "stored_by": "metadata_agent"
+      }
+    agent: metadata_agent
+
+  - task_name: detect_drift
+    description: >
+      Compare the newly stored snapshot(s) against previous snapshot(s) and produce a drift_report
+      describing changes, severity, and short summary. Uses rules-based logic and optional LLM
+      augmentation (on metadata-only content).
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "drift_detected": <bool>,
+        "drift_report": {
+          "changes": [
+            { "op": "<add|remove|change>", "field": "<name>", "before": {...}, "after": {...}, "severity": "<low|medium|high>" },
+            ...
+          ],
+          "summary": "<human friendly summary>",
+          "severity": "<info|warning|critical>"
+        },
+        "detected_by": "detector_agent"
+      }
+    agent: detector_agent
+
+  - task_name: generate_healing
+    description: >
+      Given a drift_report and impacted_lineage (from metadata), generate healing actions:
+      SQL/dbt patches, API contract updates, or migration hints. Return scripts with confidence.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "healing": {
+          "recommended_actions": [
+            { "type":"<sql|dbt|api_patch>", "script":"<script_text>", "confidence": <0-100> },
+            ...
+          ],
+          "next_steps": "<manual|auto|pause_pipeline>"
+        },
+        "generated_by": "healer_agent"
+      }
+    agent: healer_agent
+
+  - task_name: notify_operator
+    description: >
+      Send a notification to operators according to policy (email, Slack, Teams, webhook).
+      Notification must not contain PII or sample values; include safe links/IDs to console.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "notification_id": "<id>",
+        "channels": [ "<email|slack|teams|webhook>" ],
+        "sent": <bool>,
+        "operator_response": { "decision": "<approve|reject|defer>|null", "timestamp": "<ts>|null" }
+      }
+    agent: notification_agent
+
+  - task_name: finalize_decision
+    description: >
+      Aggregate outputs from detector/healer/notification and produce the final decision returned to the caller.
+      Decides whether the pipeline should continue, pause, or require manual review.
+    expected_output: |
+      {
+        "request_id": "<uuid>",
+        "decision": "<continue|pause|manual_review|auto_heal>",
+        "details": { "drift": <bool>, "severity": "<info|warning|critical|null>", "snapshot_ids":[...], "healing": {...} }
+      }
+    agent: orchestrator_agent
