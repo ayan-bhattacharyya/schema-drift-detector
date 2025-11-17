@@ -4,6 +4,10 @@
   - Recreates constraints (idempotent)
   - Inserts Entities, Fields, Snapshots (metadata-only), ETLJobs and Transformations
   - No sample data / no PII
+
+  UPDATED: ETLJob nodes now include policy properties:
+    auto_heal_allowed, notify_on_breaking, notify_channels, operator_contact,
+    healing_strategy, severity_ruleset
 */
 
 ///// 0) Wipe database (dangerous: deletes everything) /////
@@ -100,20 +104,57 @@ MERGE (ef:Field {field_id: erpEntity.name + '|' + f.name + '|' + f.data_type + '
   ON MATCH SET ef.ordinal = f.ordinal
 MERGE (erpEntity)-[:HAS_FIELD]->(ef);
 
-///// 7) Upsert ETL jobs and link to entities (job_id = pipeline name) /////
+///// 7) Upsert ETL jobs and link to entities (job_id = pipeline name) ///// 
+/* UPDATED: add policy properties to ETLJob nodes (auto_heal_allowed, notify_on_breaking, notify_channels,
+   operator_contact, healing_strategy, severity_ruleset). Adjust defaults below as needed. */
 MATCH (src:Entity {name:'people-info.csv'}), (fin:Entity {name:'finance-people.csv'}), (erp:Entity {name:'erp-people.csv'})
 MERGE (jobFin:ETLJob {job_id: 'CRM-To-Finance-PeopleData'})
-  ON CREATE SET jobFin.name = 'CRM-To-Finance-PeopleData', jobFin.description = 'ETL: people-info.csv -> finance-people.csv', jobFin.created = datetime(), jobFin.schedule = 'ad-hoc'
-  ON MATCH SET jobFin.last_seen = datetime()
+  ON CREATE SET jobFin.name = 'CRM-To-Finance-PeopleData',
+                jobFin.description = 'ETL: people-info.csv -> finance-people.csv',
+                jobFin.created = datetime(),
+                jobFin.schedule = 'ad-hoc',
+                /* ====== POLICY PROPERTIES (UPDATED) ====== */
+                jobFin.auto_heal_allowed = true,
+                jobFin.notify_on_breaking = true,
+                jobFin.notify_channels = ['email', 'teams'],
+                jobFin.operator_contact = 'finance-ops@company.com',
+                jobFin.healing_strategy = 'patch',
+                jobFin.severity_ruleset = 'standard'
+  ON MATCH SET jobFin.last_seen = datetime(),
+                /* Keep policies in-sync on subsequent runs (idempotent update) */
+                jobFin.auto_heal_allowed = coalesce(jobFin.auto_heal_allowed, true),
+                jobFin.notify_on_breaking = coalesce(jobFin.notify_on_breaking, true),
+                jobFin.notify_channels = coalesce(jobFin.notify_channels, ['email', 'teams']),
+                jobFin.operator_contact = coalesce(jobFin.operator_contact, 'finance-ops@company.com'),
+                jobFin.healing_strategy = coalesce(jobFin.healing_strategy, 'patch'),
+                jobFin.severity_ruleset = coalesce(jobFin.severity_ruleset, 'standard')
+
 MERGE (jobERP:ETLJob {job_id: 'CRM-To-ERP-PeopleData'})
-  ON CREATE SET jobERP.name = 'CRM-To-ERP-PeopleData', jobERP.description = 'ETL: people-info.csv -> erp-people.csv', jobERP.created = datetime(), jobERP.schedule = 'ad-hoc'
-  ON MATCH SET jobERP.last_seen = datetime()
+  ON CREATE SET jobERP.name = 'CRM-To-ERP-PeopleData',
+                jobERP.description = 'ETL: people-info.csv -> erp-people.csv',
+                jobERP.created = datetime(),
+                jobERP.schedule = 'ad-hoc',
+                /* ====== POLICY PROPERTIES (UPDATED) ====== */
+                jobERP.auto_heal_allowed = false,
+                jobERP.notify_on_breaking = true,
+                jobERP.notify_channels = ['email'],
+                jobERP.operator_contact = 'erp-ops@company.com',
+                jobERP.healing_strategy = 'pause',
+                jobERP.severity_ruleset = 'strict'
+  ON MATCH SET jobERP.last_seen = datetime(),
+                jobERP.auto_heal_allowed = coalesce(jobERP.auto_heal_allowed, false),
+                jobERP.notify_on_breaking = coalesce(jobERP.notify_on_breaking, true),
+                jobERP.notify_channels = coalesce(jobERP.notify_channels, ['email']),
+                jobERP.operator_contact = coalesce(jobERP.operator_contact, 'erp-ops@company.com'),
+                jobERP.healing_strategy = coalesce(jobERP.healing_strategy, 'pause'),
+                jobERP.severity_ruleset = coalesce(jobERP.severity_ruleset, 'strict')
+
 MERGE (jobFin)-[:USES_SOURCE]->(src)
 MERGE (jobFin)-[:PRODUCES]->(fin)
 MERGE (jobERP)-[:USES_SOURCE]->(src)
 MERGE (jobERP)-[:PRODUCES]->(erp);
 
-///// 8) Transformations: CRM-To-Finance-PeopleData mappings /////
+///// 8) Transformations: CRM-To-Finance-PeopleData mappings ///// 
 /* 0: firstname = first token of name */
 MATCH
   (s:Entity {name:'people-info.csv'})-[:HAS_FIELD]->(sf_name:Field {name:'name'}),
@@ -279,10 +320,22 @@ MATCH (je2:ETLJob {job_id:'CRM-To-ERP-PeopleData'}), (e2:Entity {name:'people-in
 MERGE (e2)-[:SOURCE_FOR {job_id: je2.job_id}]->(je2)
 MERGE (je2)-[:TARGETS]->(t2);
 
-///// 12) Return verification counts /////
+///// 12) Return verification counts and job policies /////
 CALL { MATCH (n:Snapshot) RETURN count(n) AS snapshot_count }
 CALL { MATCH (m:Entity) RETURN count(m) AS entity_count }
 CALL { MATCH (f:Field) RETURN count(f) AS field_count }
 CALL { MATCH (j:ETLJob) RETURN count(j) AS etljob_count }
 CALL { MATCH (t:Transformation) RETURN count(t) AS transformation_count }
+
 RETURN snapshot_count, entity_count, field_count, etljob_count, transformation_count;
+
+/* Optional: inspect ETLJob policy properties */
+MATCH (jj:ETLJob)
+RETURN jj.job_id AS job_id,
+       jj.auto_heal_allowed AS auto_heal_allowed,
+       jj.notify_on_breaking AS notify_on_breaking,
+       jj.notify_channels AS notify_channels,
+       jj.operator_contact AS operator_contact,
+       jj.healing_strategy AS healing_strategy,
+       jj.severity_ruleset AS severity_ruleset
+ORDER BY job_id;
