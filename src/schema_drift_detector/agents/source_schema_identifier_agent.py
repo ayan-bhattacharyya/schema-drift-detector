@@ -7,6 +7,11 @@ from pydantic import BaseModel, ValidationError, field_validator
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
+try:
+    from neo4j.exceptions import Neo4jError
+except Exception:  # pragma: no cover - defensive fallback
+    Neo4jError = Exception
+
 logger = logging.getLogger("source_schema_identifier_agent")
 logger.setLevel(logging.INFO)
 if not logger.hasHandlers():
@@ -170,6 +175,12 @@ class SourceSchemaIdentifierAgent:
 
     def __init__(self):
         self._driver = _driver()
+    
+    def close(self) -> None:
+        try:
+            self._driver.close()
+        except Exception:
+            logger.exception("Error closing Neo4j driver")
 
     def _run_read(self, cypher: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         params = params or {}
@@ -321,8 +332,15 @@ class SourceSchemaIdentifierAgent:
 
 # Optional: allow running standalone for local testing
 if __name__ == "__main__":
-    import json
+    import json, sys
     agent = SourceSchemaIdentifierAgent()
-    sample_input = {"pipeline": "CRM-To-Finance-PeopleData", "request_id": "local-test-1"}
-    out = agent.run(sample_input)
-    print(json.dumps(out, indent=2))
+    try:
+        sample_input = {"pipeline": "CRM-To-Finance-PeopleData", "request_id": "local-test-1"}
+        out = agent.run(sample_input)
+        print(json.dumps(out, indent=2))
+    except Exception as e:
+        print("ERROR:", str(e), file=sys.stderr)
+        raise
+    finally:
+        agent.close()
+    

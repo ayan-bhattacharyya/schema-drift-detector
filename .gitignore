@@ -213,3 +213,6 @@ __marimo__/
 .github/
 .vscode/
 .DS_Store
+
+# Example Files
+examples/
