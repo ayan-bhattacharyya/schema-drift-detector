@@ -1,0 +1,253 @@
+{
+  "pipeline": "CRM-To-Finance-PeopleData",
+  "sources": [
+    {
+      "source_id": "people-info.csv",
+      "type": "file",
+      "entity": "people-info.csv",
+      "metadata_ref": {
+        "node_id": null,
+        "properties": {
+          "created": "2025-11-17T01:48:44.838000000+00:00",
+          "name": "people-info.csv",
+          "source_path": "people-info.csv",
+          "type": "file"
+        }
+      },
+      "fields": [
+        {
+          "field_id": "people-info.csv|name|string|false",
+          "name": "name",
+          "type": "string",
+          "nullable": false,
+          "ordinal": 0
+        },
+        {
+          "field_id": "people-info.csv|date_of_birth|date|false",
+          "name": "date_of_birth",
+          "type": "date",
+          "nullable": false,
+          "ordinal": 1
+        },
+        {
+          "field_id": "people-info.csv|gender|string|true",
+          "name": "gender",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 2
+        },
+        {
+          "field_id": "people-info.csv|company|string|true",
+          "name": "company",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 3
+        },
+        {
+          "field_id": "people-info.csv|designation|string|true",
+          "name": "designation",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 4
+        }
+      ]
+    }
+  ],
+  "produces": [
+    {
+      "entity": "finance-people.csv",
+      "metadata_ref": {
+        "node_id": null,
+        "properties": {
+          "created": "2025-11-17T01:48:45.013000000+00:00",
+          "name": "finance-people.csv",
+          "source_path": "finance-people.csv",
+          "type": "file"
+        }
+      },
+      "fields": [
+        {
+          "field_id": "finance-people.csv|firstname|string|false",
+          "name": "firstname",
+          "type": "string",
+          "nullable": false,
+          "ordinal": 0
+        },
+        {
+          "field_id": "finance-people.csv|lastname|string|false",
+          "name": "lastname",
+          "type": "string",
+          "nullable": false,
+          "ordinal": 1
+        },
+        {
+          "field_id": "finance-people.csv|age|int|true",
+          "name": "age",
+          "type": "int",
+          "nullable": true,
+          "ordinal": 2
+        },
+        {
+          "field_id": "finance-people.csv|gender|string|true",
+          "name": "gender",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 3
+        },
+        {
+          "field_id": "finance-people.csv|company|string|true",
+          "name": "company",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 4
+        },
+        {
+          "field_id": "finance-people.csv|designation|string|true",
+          "name": "designation",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 5
+        }
+      ]
+    }
+  ],
+  "transformations": [
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|0",
+      "mapping_order": 0,
+      "source_field": "people-info.csv|name|string|false",
+      "target_field": "finance-people.csv|firstname|string|false",
+      "expression": "split(name, ' ')[0]",
+      "description": "firstname = first token of source.name",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|0",
+        "source_field": "people-info.csv|name|string|false",
+        "expression": "split(name, ' ')[0]",
+        "target_field": "finance-people.csv|firstname|string|false",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:45.855000000+00:00",
+        "mapping_order": 0,
+        "description": "firstname = first token of source.name"
+      }
+    },
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|1",
+      "mapping_order": 1,
+      "source_field": "people-info.csv|name|string|false",
+      "target_field": "finance-people.csv|lastname|string|false",
+      "expression": "split(name, ' ')[size(split(name,' '))-1]",
+      "description": "lastname = last token of source.name",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|1",
+        "source_field": "people-info.csv|name|string|false",
+        "expression": "split(name, ' ')[size(split(name,' '))-1]",
+        "target_field": "finance-people.csv|lastname|string|false",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:46.017000000+00:00",
+        "mapping_order": 1,
+        "description": "lastname = last token of source.name"
+      }
+    },
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|2",
+      "mapping_order": 2,
+      "source_field": "people-info.csv|date_of_birth|date|false",
+      "target_field": "finance-people.csv|age|int|true",
+      "expression": "age = floor(duration.between(date_parsed(date_of_birth), date()).years)",
+      "description": "age computed from date_of_birth",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|2",
+        "source_field": "people-info.csv|date_of_birth|date|false",
+        "expression": "age = floor(duration.between(date_parsed(date_of_birth), date()).years)",
+        "target_field": "finance-people.csv|age|int|true",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:46.144000000+00:00",
+        "mapping_order": 2,
+        "description": "age computed from date_of_birth"
+      }
+    },
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|3",
+      "mapping_order": 3,
+      "source_field": "people-info.csv|gender|string|true",
+      "target_field": "finance-people.csv|gender|string|true",
+      "expression": "gender -> gender",
+      "description": "gender copied from source.gender",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|3",
+        "source_field": "people-info.csv|gender|string|true",
+        "expression": "gender -> gender",
+        "target_field": "finance-people.csv|gender|string|true",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:46.277000000+00:00",
+        "mapping_order": 3,
+        "description": "gender copied from source.gender"
+      }
+    },
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|4",
+      "mapping_order": 4,
+      "source_field": "people-info.csv|company|string|true",
+      "target_field": "finance-people.csv|company|string|true",
+      "expression": "company -> company",
+      "description": "company copied from source.company",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|4",
+        "source_field": "people-info.csv|company|string|true",
+        "expression": "company -> company",
+        "target_field": "finance-people.csv|company|string|true",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:46.400000000+00:00",
+        "mapping_order": 4,
+        "description": "company copied from source.company"
+      }
+    },
+    {
+      "transformation_id": "CRM-To-Finance-PeopleData|5",
+      "mapping_order": 5,
+      "source_field": "people-info.csv|designation|string|true",
+      "target_field": "finance-people.csv|designation|string|true",
+      "expression": "designation -> designation",
+      "description": "designation copied from source.designation",
+      "metadata": {
+        "transformation_id": "CRM-To-Finance-PeopleData|5",
+        "source_field": "people-info.csv|designation|string|true",
+        "expression": "designation -> designation",
+        "target_field": "finance-people.csv|designation|string|true",
+        "job_id": "CRM-To-Finance-PeopleData",
+        "created": "2025-11-17T01:48:46.518000000+00:00",
+        "mapping_order": 5,
+        "description": "designation copied from source.designation"
+      }
+    }
+  ],
+  "policies": {
+    "auto_heal_allowed": true,
+    "notify_on_breaking": true,
+    "notify_channels": [
+      "email",
+      "teams"
+    ],
+    "operator_contact": "finance-ops@company.com"
+  },
+  "job_node": {
+    "node_id": null,
+    "properties": {
+      "schedule": "ad-hoc",
+      "auto_heal_allowed": true,
+      "notify_on_breaking": true,
+      "operator_contact": "finance-ops@company.com",
+      "job_id": "CRM-To-Finance-PeopleData",
+      "created": "2025-11-17T01:48:45.699000000+00:00",
+      "name": "CRM-To-Finance-PeopleData",
+      "description": "ETL: people-info.csv -> finance-people.csv",
+      "notify_channels": [
+        "email",
+        "teams"
+      ],
+      "healing_strategy": "patch",
+      "severity_ruleset": "standard"
+    }
+  },
+  "request_id": "local-test-1"
+}

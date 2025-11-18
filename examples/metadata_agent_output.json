@@ -1,0 +1,12 @@
+{
+  "request_id": "local-test-1",
+  "snapshot_id": "4eb697a5-7e51-46a3-a22d-c602064e87ba",
+  "previous_snapshot_id": "snapshot_peopleinfo_v1",
+  "impacted_jobs": [
+    "CRM-To-Finance-PeopleData",
+    "CRM-To-ERP-PeopleData"
+  ],
+  "stored": true,
+  "created_by": "schema_drift_detector_agent",
+  "timestamp": "2025-11-18T00:40:59.382736+00:00"
+}
