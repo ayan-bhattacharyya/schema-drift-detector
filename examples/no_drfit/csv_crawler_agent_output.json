@@ -55,8 +55,8 @@
       ],
       "version_meta": {
         "created_by": "csv_crawler_agent",
-        "timestamp": "2025-11-18T00:40:59.382736+00:00",
-        "source_path": "/schema_drift_detector/schema_drift_detector/examples/people-info.csv"
+        "timestamp": "2025-11-19T11:54:58.725705+00:00",
+        "source_path": "/../schema_drift_detector/examples/people-info.csv"
       }
     }
   }

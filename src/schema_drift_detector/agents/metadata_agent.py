@@ -119,8 +119,9 @@ class MetadataAgent:
         created_by = version_meta.get("created_by") or "unknown"
         source_path = version_meta.get("source_path") or version_meta.get("path") or None
 
+        logger.info("Persisting snapshot snapshot_id=%s entity=%s fields=%d", snapshot_id, entity_name, len(fields))
+
         # perform DB write in transaction
-        # specify database if provided
         session_kwargs = {"database": NEO4J_DB} if NEO4J_DB else {}
         try:
             with self._driver.session(**session_kwargs) as session:
@@ -151,15 +152,22 @@ class MetadataAgent:
         return response
 
     @staticmethod
-    def _tx_persist_snapshot(tx, snapshot_id: str, source_id: Optional[str], entity_name: str, fields: List[Dict[str, Any]], created_by: str, timestamp: str, source_path: Optional[str]) -> Dict[str, Any]:
+    def _tx_persist_snapshot(tx,
+                             snapshot_id: str,
+                             source_id: Optional[str],
+                             entity_name: str,
+                             fields: List[Dict[str, Any]],
+                             created_by: str,
+                             timestamp: str,
+                             source_path: Optional[str]) -> Dict[str, Any]:
         """
-        Transaction body:
-         - ensure Entity node exists (MERGE by name)
-         - create Snapshot node with snapshot_id and properties
-         - create SnapshotField nodes (one per field) and link via :HAS_FIELD_COPY
-         - find the latest snapshot for the same entity and link via :PREVIOUS_SNAPSHOT
-         - attach :HAS_ENTITY relationship from Snapshot -> Entity
-         - find impacted ETLJob nodes that PRODUCES or USES this entity (simple search) and return list
+        Transaction body (executed inside a single DB transaction):
+         1) Ensure Entity node exists (MERGE by name)
+         2) Identify previous snapshot id for this entity (if any)
+         3) Create Snapshot node
+         4) Bulk-create SnapshotField nodes using UNWIND and link them to the Snapshot (bulk, safe)
+         5) Create HAS_ENTITY relationship and OPTIONAL PREVIOUS_SNAPSHOT relationship
+         6) Find impacted ETLJob nodes and return summary
         """
 
         # 1) Ensure entity exists (create placeholder if missing)
@@ -212,42 +220,49 @@ class MetadataAgent:
             raise RuntimeError("Failed to create Snapshot node")
         snap_node_id = snap_row["snap_node_id"]
 
-        # 4) Create SnapshotField nodes — serialize hints to JSON string (Neo4j doesn't accept maps as property values)
-        created_count = 0
+        # 4) Bulk-create SnapshotField nodes and link them to the Snapshot using UNWIND
+        # Prepare field list for UNWIND with JSON serialization for hints (hints_json)
+        field_list = []
         for f in fields:
+            # ensure canonical shape/typing
             fname = f.get("name")
             ftype = f.get("type")
             fnullable = bool(f.get("nullable")) if "nullable" in f else True
             forder = int(f.get("ordinal", 0)) if f.get("ordinal") is not None else 0
             fhints = f.get("hints", {}) or {}
-            # Convert hints map to JSON string if non-empty; otherwise set to NULL
             fhints_json = json.dumps(fhints) if fhints else None
+            field_list.append({
+                "field_uuid": str(uuid.uuid4()),
+                "name": fname,
+                "data_type": ftype,
+                "nullable": fnullable,
+                "ordinal": forder,
+                "hints_json": fhints_json,
+            })
 
-            field_uuid = str(uuid.uuid4())
-            q_field = """
+        fields_created = 0
+        if field_list:
+            # UNWIND bulk insertion - MATCH the snapshot by id and create all fields linked to it
+            q_bulk = """
+            MATCH (snap:Snapshot {id:$snapshot_id})
+            UNWIND $field_list AS f
             CREATE (sf:SnapshotField {
-                id: $field_uuid,
-                name: $fname,
-                data_type: $ftype,
-                nullable: $fnullable,
-                ordinal: $forder,
-                hints_json: $fhints_json
+                id: f.field_uuid,
+                name: f.name,
+                data_type: f.data_type,
+                nullable: f.nullable,
+                ordinal: f.ordinal,
+                hints_json: f.hints_json
             })
             CREATE (snap)-[:HAS_FIELD_COPY]->(sf)
-            RETURN id(sf) AS sf_node_id
+            RETURN count(sf) AS created_count
             """
-            recf = tx.run(
-                q_field,
-                field_uuid=field_uuid,
-                fname=fname,
-                ftype=ftype,
-                fnullable=fnullable,
-                forder=forder,
-                fhints_json=fhints_json,
-            )
-            # consume the result to ensure errors are raised within the tx
-            _ = recf.single()
-            created_count += 1
+            rec_bulk = tx.run(q_bulk, snapshot_id=snapshot_id, field_list=field_list)
+            rrow = rec_bulk.single()
+            if rrow:
+                fields_created = int(rrow["created_count"]) if rrow.get("created_count") is not None else 0
+            else:
+                fields_created = 0
 
         # 5) Link Snapshot -> Entity and Snapshot -> previous snapshot if exists
         tx.run(
@@ -262,7 +277,7 @@ class MetadataAgent:
                 previous_snapshot_id=previous_snapshot_id,
             )
 
-        # 6) Find impacted ETL jobs that use or produce this Entity
+        # 6) Find impacted ETL jobs that use or produce this Entity (distinct)
         q_jobs = """
         MATCH (j:ETLJob)-[:USES_SOURCE|:PRODUCES]->(e:Entity {name: $entity_name})
         RETURN DISTINCT j.job_id AS job_id
@@ -273,7 +288,7 @@ class MetadataAgent:
         return {
             "previous_snapshot_id": previous_snapshot_id,
             "impacted_jobs": impacted_jobs,
-            "fields_created": created_count,
+            "fields_created": fields_created,
             "entity_node_id": entity_node_id,
             "snapshot_node_id": snap_node_id,
         }
@@ -283,7 +298,7 @@ if __name__ == "__main__":
     import json, sys
 
     sample_payload = {
-        "request_id": "local-test-1",
+        "request_id": "local-test-3",
         "source_id": "people-info.csv",
         "entity": "people-info.csv",
         "snapshot": {
@@ -295,12 +310,12 @@ if __name__ == "__main__":
                     {"name": "date_of_birth", "type": "date", "nullable": False, "ordinal": 1},
                     {"name": "gender", "type": "string", "nullable": True, "ordinal": 2},
                     {"name": "company", "type": "string", "nullable": True, "ordinal": 3},
-                    {"name": "designation", "type": "string", "nullable": True, "ordinal": 4},
+                    {"name": "designation", "type": "string", "nullable": True, "ordinal": 4}
                 ],
                 "version_meta": {
                     "created_by": "schema_drift_detector_agent",
-                    "timestamp": "2025-11-18T00:40:59.382736+00:00",
-                    "source_path": "/Users/ayanbhattacharyya/.../examples/people-info.csv",
+                    "timestamp": "2025-11-19T13:03:31.745777+00:00",
+                    "source_path": "../schema_drift_detector/examples/people-info.csv",
                 },
             },
         },

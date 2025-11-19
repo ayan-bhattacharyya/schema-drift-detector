@@ -335,7 +335,7 @@ if __name__ == "__main__":
     import json, sys
     agent = SourceSchemaIdentifierAgent()
     try:
-        sample_input = {"pipeline": "CRM-To-Finance-PeopleData", "request_id": "local-test-1"}
+        sample_input = {"pipeline": "CRM-To-Finance-PeopleData", "request_id": "local-test-2"}
         out = agent.run(sample_input)
         print(json.dumps(out, indent=2))
     except Exception as e:

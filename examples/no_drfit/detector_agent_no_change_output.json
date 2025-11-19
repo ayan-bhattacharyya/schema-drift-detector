@@ -1,0 +1,13 @@
+{
+  "request_id": "DRIFT-ANALYSIS-1",
+  "drift_detected": false,
+  "drift_report": {
+    "changes": [],
+    "summary": "no schema drift detected",
+    "severity": "info"
+  },
+  "impacted_jobs": [
+    "CRM-To-Finance-PeopleData"
+  ],
+  "detected_by": "detector_agent_llm"
+}

@@ -298,7 +298,7 @@ if __name__ == "__main__":
     agent = CSVCrawlerAgent()
     # Example: pass path via metadata_ref or rely on source_id as filename in cwd
     sample_input = {
-        "request_id": "local-test-1",
+        "request_id": "local-test-2",
         "source_id": "people-info.csv",
         "entity": "people-info.csv",
         "metadata_ref": {"properties": {"source_path": "/Users/ayanbhattacharyya/Documents/ai-workspace/schema_drift_detector/schema_drift_detector/examples/people-info.csv"}},

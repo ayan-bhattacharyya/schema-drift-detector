@@ -1,6 +1,6 @@
 {
   "request_id": "local-test-1",
-  "snapshot_id": "4eb697a5-7e51-46a3-a22d-c602064e87ba",
+  "snapshot_id": "cd7c7e7a-edbd-4992-b55d-ea4fff890366",
   "previous_snapshot_id": "snapshot_peopleinfo_v1",
   "impacted_jobs": [
     "CRM-To-Finance-PeopleData",
@@ -8,5 +8,5 @@
   ],
   "stored": true,
   "created_by": "schema_drift_detector_agent",
-  "timestamp": "2025-11-18T00:40:59.382736+00:00"
+  "timestamp": "2025-11-19T09:16:21.187532+00:00"
 }

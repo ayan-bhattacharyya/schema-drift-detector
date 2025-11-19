@@ -1,0 +1,27 @@
+{
+  "request_id": "DRIFT-ANALYSIS-1",
+  "drift_detected": true,
+  "drift_report": {
+    "changes": [
+      {
+        "op": "add",
+        "field": "country",
+        "before": null,
+        "after": {
+          "name": "country",
+          "type": "string",
+          "nullable": true,
+          "ordinal": 5
+        },
+        "severity": "low",
+        "notes": "field added"
+      }
+    ],
+    "summary": "add country (low)",
+    "severity": "info"
+  },
+  "impacted_jobs": [
+    "CRM-To-Finance-PeopleData"
+  ],
+  "detected_by": "detector_agent_llm"
+}
