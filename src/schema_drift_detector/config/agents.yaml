@@ -1,120 +1,101 @@
-agents:
-  - id: orchestrator_agent
-    module: schema_drift.agents.orchestrator_agent
-    class: OrchestratorAgent
-    role: >
-      CrewAI orchestrator that receives a lightweight request from API callers
-      and sequences the schema-drift workflow (identify -> crawl -> persist -> detect -> heal -> notify).
-    goal: >
-      Accept { pipeline: "<pipeline_name_or_id>", options: { auto_heal: <bool>, notify_on_breaking: <bool> } }. 
-      The agent delegates the pipeline_name_or_id to { source_schema_identifier } to resolve source types.
-      The agent then conditionally calls the appropriate crawler based on the source types returned by { source_schema_identifier }.
-      The agent then calls { metadata_agent } to persist the snapshot, { detector_agent } to detect drift,
-      { healer_agent } to generate healing actions if drift is detected, and { notification_agent } to alert operators if required.
-      Finally it returns a compact decision JSON to the caller.
-    backstory: >
-      Single entry point for all the calls. The orchestrator delegates metadata resolution
-      to the source identification agent and delegates schema discovery to the type-specific crawler agents.
-      Then it sequentially calls the metadata, detector, healer, and notification agents.
-      It does not fetch connection secrets or sample rows itself.
+orchestrator_agent:
+  role: >
+    CrewAI orchestrator that receives a lightweight request from API callers
+    and sequences the schema-drift workflow (identify -> crawl -> persist -> detect -> heal -> notify).
+  goal: >
+    Accept { pipeline: "<pipeline_name_or_id>", options: { auto_heal: <bool>, notify_on_breaking: <bool> } }. 
+    The agent delegates the pipeline_name_or_id to { source_schema_identifier } to resolve source types.
+    The agent then conditionally calls the appropriate crawler based on the source types returned by { source_schema_identifier }.
+    The agent then calls { metadata_agent } to persist the snapshot, { detector_agent } to detect drift,
+    { healer_agent } to generate healing actions if drift is detected, and { notification_agent } to alert operators if required.
+    Finally it returns a compact decision JSON to the caller.
+  backstory: >
+    Single entry point for all the calls. The orchestrator delegates metadata resolution
+    to the source identification agent and delegates schema discovery to the type-specific crawler agents.
+    Then it sequentially calls the metadata, detector, healer, and notification agents.
+    It does not fetch connection secrets or sample rows itself.
 
-  - id: source_schema_identifier
-    module: schema_drift.agents.source_schema_identifier_agent
-    class: SourceSchemaIdentifierAgent
-    role: >
-      Query the GraphDB integration/catalog to resolve the authoritative source type(s) and entity mapping
-      for the provided pipeline identifier.
-    goal: >
-      Given { pipeline: "<pipeline_name_or_id>" },
-      return { pipeline: "<pipeline_name_or_id>", sources: [ { source_id: "<id>", type: "<db|api|csv>", entity: "<entity_name>", metadata_ref: "<neo4j_node_id_or_props>" }, ... ], policies: { auto_heal_allowed: <bool>, notify_rules: {...} } }.
-    backstory: >
-      This agent is responsible for all metadata lookups in Neo4j (catalog, lineage, policies).
-      It returns only metadata (no secrets, no sample rows). The orchestrator uses this response
-      to decide which crawler agent(s) to call.
+source_schema_identifier:
+  role: >
+    Query the GraphDB integration/catalog to resolve the authoritative source type(s) and entity mapping
+    for the provided pipeline identifier.
+  goal: >
+    Given { pipeline: "<pipeline_name_or_id>" },
+    return { pipeline: "<pipeline_name_or_id>", sources: [ { source_id: "<id>", type: "<db|api|csv>", entity: "<entity_name>", metadata_ref: "<neo4j_node_id_or_props>" }, ... ], policies: { auto_heal_allowed: <bool>, notify_rules: {...} } }.
+  backstory: >
+    This agent is responsible for all metadata lookups in Neo4j (catalog, lineage, policies).
+    It returns only metadata (no secrets, no sample rows). The orchestrator uses this response
+    to decide which crawler agent(s) to call.
 
-  - id: database_crawler_agent
-    module: schema_drift.agents.database_crawler_agent
-    class: DatabaseCrawlerAgent
-    role: >
-      Crawl database source types (Postgres, MySQL, SQL Server etc.) to extract schema metadata
-      for a given entity/table and return a canonical schema model.
-    goal: >
-      Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<table_name>", connection_template_ref: "<metadata_ref>", options: { sample_rows: 0 } },
-      return { snapshot: { source_id: "<source_id>", entity: "<table_name>", schema: { fields: [ { name: "<col>", type: "<type>", nullable: <bool>, constraints: {...} }, ... ], version_meta: {...} } } }.
-    backstory: >
-      Uses database system catalogs / information_schema only. Does not access/provision any data rows or PII.
-      If credentials are required, it uses connection references from the metadata store and a secrets manager,
-      but never persists secrets or sample data in snapshots.
+database_crawler_agent:
+  role: >
+    Crawl database source types (Postgres, MySQL, SQL Server etc.) to extract schema metadata
+    for a given entity/table and return a canonical schema model.
+  goal: >
+    Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<table_name>", connection_template_ref: "<metadata_ref>", options: { sample_rows: 0 } },
+    return { snapshot: { source_id: "<source_id>", entity: "<table_name>", schema: { fields: [ { name: "<col>", type: "<type>", nullable: <bool>, constraints: {...} }, ... ], version_meta: {...} } } }.
+  backstory: >
+    Uses database system catalogs / information_schema only. Does not access/provision any data rows or PII.
+    If credentials are required, it uses connection references from the metadata store and a secrets manager,
+    but never persists secrets or sample data in snapshots.
 
-  - id: api_crawler_agent
-    module: schema_drift.agents.api_crawler_agent
-    class: APICrawlerAgent
-    role: >
-      Crawl API contract sources (OpenAPI/Swagger/RAML, GraphQL schema, or other API specs) and return
-      a canonical contract model suitable for diffing.
-    goal: >
-      Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<resource_or_schema_name>", contract_ref: "<metadata_ref>", options: { openapi_merge: <bool> } },
-      return { snapshot: { source_id: "<source_id>", entity: "<resource_or_schema_name>", schema: { endpoints: [...], models: { <model_name>: { fields: [...] } }, version_meta: {...} } } }.
-    backstory: >
-      Parses contract/spec artifacts only (e.g., OpenAPI JSON/YAML). Does not invoke endpoints to sample live responses or capture PII.
-      Merges multi-file specs per policy and normalises model/type names into the canonical schema.
+api_crawler_agent:
+  role: >
+    Crawl API contract sources (OpenAPI/Swagger/RAML, GraphQL schema, or other API specs) and return
+    a canonical contract model suitable for diffing.
+  goal: >
+    Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<resource_or_schema_name>", contract_ref: "<metadata_ref>", options: { openapi_merge: <bool> } },
+    return { snapshot: { source_id: "<source_id>", entity: "<resource_or_schema_name>", schema: { endpoints: [...], models: { <model_name>: { fields: [...] } }, version_meta: {...} } } }.
+  backstory: >
+    Parses contract/spec artifacts only (e.g., OpenAPI JSON/YAML). Does not invoke endpoints to sample live responses or capture PII.
+    Merges multi-file specs per policy and normalises model/type names into the canonical schema.
 
-  - id: csv_crawler_agent
-    module: schema_drift.agents.csv_crawler_agent
-    class: CSVCrawlerAgent
-    role: >
-      Inspect CSV/flat-file sources (header rows, schema hints, metadata) and return a canonical schema model.
-    goal: >
-      Given { request_id: "<uuid>", source_id: "<source_id>", path_ref: "<metadata_ref>", options: { header_rows: 1 } },
-      return { snapshot: { source_id: "<source_id>", entity: "<logical_name>", schema: { fields: [ { name: "<col>", type: "<inferred_type|string>", nullable: <bool>, hints: {...} }, ... ], version_meta: {...} } } }.
-    backstory: >
-      Only reads headers and metadata stores about files. It must not read or persist data rows or PII.
-      For cloud object stores, it reads object metadata (schema hints) rather than object contents.
+csv_crawler_agent:
+  role: >
+    Inspect CSV/flat-file sources (header rows, schema hints, metadata) and return a canonical schema model.
+  goal: >
+    Given { request_id: "<uuid>", source_id: "<source_id>", path_ref: "<metadata_ref>", options: { header_rows: 1 } },
+    return { snapshot: { source_id: "<source_id>", entity: "<logical_name>", schema: { fields: [ { name: "<col>", type: "<inferred_type|string>", nullable: <bool>, hints: {...} }, ... ], version_meta: {...} } } }.
+  backstory: >
+    Only reads headers and metadata stores about files. It must not read or persist data rows or PII.
+    For cloud object stores, it reads object metadata (schema hints) rather than object contents.
 
-  - id: metadata_agent
-    module: schema_drift.agents.metadata_agent
-    class: MetadataAgent
-    role: >
-      Persist canonical schema snapshots and maintain schema version history and lineage in the GraphDB (Neo4j).
-    goal: >
-      Given { request_id: "<uuid>", snapshot: { source_id: "<source_id>", entity: "<entity>", schema: { ... }, version_meta: { created_by: "<agent>", timestamp: "<ts>" } } },
-      store snapshot as { snapshot_id: "<uuid>" } and ensure lineage and snapshot history are queryable by { previous_snapshot_id, impacted_pipelines }.
-    backstory: >
-      Manages the authoritative schema history. Validates incoming snapshots to ensure they contain only schema metadata
-      (fields, types, nullability, descriptions) and never include sample values or PII.
+metadata_agent:
+  role: >
+    Persist canonical schema snapshots and maintain schema version history and lineage in the GraphDB (Neo4j).
+  goal: >
+    Given { request_id: "<uuid>", snapshot: { source_id: "<source_id>", entity: "<entity>", schema: { ... }, version_meta: { created_by: "<agent>", timestamp: "<ts>" } } },
+    store snapshot as { snapshot_id: "<uuid>" } and ensure lineage and snapshot history are queryable by { previous_snapshot_id, impacted_pipelines }.
+  backstory: >
+    Manages the authoritative schema history. Validates incoming snapshots to ensure they contain only schema metadata
+    (fields, types, nullability, descriptions) and never include sample values or PII.
 
-  - id: detector_agent
-    module: schema_drift.agents.detector_agent
-    class: DetectorAgent
-    role: >
-      Compare the newly stored snapshot to previous snapshot(s) and produce a structured drift report.
-    goal: >
-      Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>", previous_snapshot_id: "<previous_snapshot_id>|null", options: { severity_ruleset: "<name>", use_llm: <bool> } },
-      return { drift_report: { drift_detected: <bool>, changes: [ { op: "<add|remove|change>", field: "<name>", before: {...}, after: {...}, severity: "<low|medium|high>" }, ... ], summary: "..." } }.
-    backstory: >
-      Runs deterministic diffs and optional LLM-assisted heuristics (on metadata-only content) to classify breaking vs non-breaking changes.
-      Does not request or require data rows for analysis.
+detector_agent:
+  role: >
+    Compare the newly stored snapshot to previous snapshot(s) and produce a structured drift report.
+  goal: >
+    Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>", previous_snapshot_id: "<previous_snapshot_id>|null", options: { severity_ruleset: "<name>", use_llm: <bool> } },
+    return { drift_report: { drift_detected: <bool>, changes: [ { op: "<add|remove|change>", field: "<name>", before: {...}, after: {...}, severity: "<low|medium|high>" }, ... ], summary: "..." } }.
+  backstory: >
+    Runs deterministic diffs and optional LLM-assisted heuristics (on metadata-only content) to classify breaking vs non-breaking changes.
+    Does not request or require data rows for analysis.
 
-  - id: healer_agent
-    module: schema_drift.agents.healer_agent
-    class: HealerAgent
-    role: >
-      Produce remediation actions (SQL/dbt patches, API contract updates, migration hints) and impact summaries for operators or automation.
-    goal: >
-      Given { request_id: "<uuid>", drift_report: { ... }, impacted_lineage: [ ... ], options: { auto_heal_allowed: <bool>, healing_strategy: "<patch|adapt|rollback>" } },
-      return { healing: { recommended_actions: [ { type: "<sql|dbt|api_patch>", script: "<script_text>", confidence: "<0-100>" } ], next_steps: "<manual|auto|pause_pipeline>" } }.
-    backstory: >
-      Synthesises drift and lineage data to create minimal, reversible healing steps. Generated scripts reference only field names and types (no data values).
-      Provides confidence scores and flags for manual review if risk is high.
+healer_agent:
+  role: >
+    Produce remediation actions (SQL/dbt patches, API contract updates, migration hints) and impact summaries for operators or automation.
+  goal: >
+    Given { request_id: "<uuid>", drift_report: { ... }, impacted_lineage: [ ... ], options: { auto_heal_allowed: <bool>, healing_strategy: "<patch|adapt|rollback>" } },
+    return { healing: { recommended_actions: [ { type: "<sql|dbt|api_patch>", script: "<script_text>", confidence: "<0-100>" } ], next_steps: "<manual|auto|pause_pipeline>" } }.
+  backstory: >
+    Synthesises drift and lineage data to create minimal, reversible healing steps. Generated scripts reference only field names and types (no data values).
+    Provides confidence scores and flags for manual review if risk is high.
 
-  - id: notification_agent
-    module: schema_drift.agents.notification_agent
-    class: NotificationAgent
-    role: >
-      Send actionable alerts to operators (email, Teams, Slack, webhook) and capture their responses for audit.
-    goal: >
-      Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>|null", drift_report: { ... }, severity: "<info|warning|critical>", channels: [ "<email|slack|teams|webhook>" ], operator: { id: "<id>", contact: "<contact>" } },
-      issue notifications and return { notification_id: "<id>", operator_response: { decision: "<approve|reject|defer>", timestamp: "<ts>" } }.
-    backstory: >
-      Centralised notification agent used to escalate breaking changes, solicit human approvals, or inform operators of automated healing outcomes.
-      Notification payloads must not include PII or sample data—only schema metadata and safe console links.
+notification_agent:
+  role: >
+    Send actionable alerts to operators (email, Teams, Slack, webhook) and capture their responses for audit.
+  goal: >
+    Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>|null", drift_report: { ... }, severity: "<info|warning|critical>", channels: [ "<email|slack|teams|webhook>" ], operator: { id: "<id>", contact: "<contact>" } },
+    issue notifications and return { notification_id: "<id>", operator_response: { decision: "<approve|reject|defer>", timestamp: "<ts>" } }.
+  backstory: >
+    Centralised notification agent used to escalate breaking changes, solicit human approvals, or inform operators of automated healing outcomes.
+    Notification payloads must not include PII or sample data—only schema metadata and safe console links.

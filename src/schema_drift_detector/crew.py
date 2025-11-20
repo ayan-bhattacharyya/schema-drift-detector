@@ -1,64 +1,176 @@
-from crewai import Agent, Crew, Process, Task
+from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
-from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
-# If you want to run a snippet of code before or after the crew starts,
-# you can use the @before_kickoff and @after_kickoff decorators
-# https://docs.crewai.com/concepts/crews#example-crew-class-with-decorators
+import os
+
+# Import the tools we created
+from schema_drift_detector.tools.agent_tools import (
+    SourceSchemaIdentifierTool,
+    CSVCrawlerTool,
+    DatabaseCrawlerTool,
+    APICrawlerTool,
+    MetadataPersistenceTool,
+    DriftDetectionTool,
+    HealingTool,
+    NotificationTool
+)
 
 @CrewBase
 class SchemaDriftDetector():
     """SchemaDriftDetector crew"""
 
-    agents: List[BaseAgent]
-    tasks: List[Task]
+    agents_config = 'config/agents.yaml'
+    tasks_config = 'config/tasks.yaml'
 
-    # Learn more about YAML configuration files here:
-    # Agents: https://docs.crewai.com/concepts/agents#yaml-configuration-recommended
-    # Tasks: https://docs.crewai.com/concepts/tasks#yaml-configuration-recommended
-    
-    # If you would like to add tools to your agents, you can learn more about it here:
-    # https://docs.crewai.com/concepts/agents#agent-tools
-    @agent
-    def researcher(self) -> Agent:
-        return Agent(
-            config=self.agents_config['researcher'], # type: ignore[index]
-            verbose=True
+    def __init__(self):
+        # Initialize Gemini LLM
+        # Ensure GEMINI_API_KEY and GEMINI_MODEL are set in environment
+        self.llm = LLM(
+            model=f"gemini/{os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')}",
+            api_key=os.getenv("GEMINI_API_KEY")
         )
 
     @agent
-    def reporting_analyst(self) -> Agent:
+    def orchestrator_agent(self) -> Agent:
         return Agent(
-            config=self.agents_config['reporting_analyst'], # type: ignore[index]
-            verbose=True
+            config=self.agents_config['orchestrator_agent'],
+            verbose=True,
+            allow_delegation=True,
+            llm=self.llm
         )
 
-    # To learn more about structured task outputs,
-    # task dependencies, and task callbacks, check out the documentation:
-    # https://docs.crewai.com/concepts/tasks#overview-of-a-task
-    @task
-    def research_task(self) -> Task:
-        return Task(
-            config=self.tasks_config['research_task'], # type: ignore[index]
+    @agent
+    def source_schema_identifier(self) -> Agent:
+        return Agent(
+            config=self.agents_config['source_schema_identifier'],
+            tools=[SourceSchemaIdentifierTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def database_crawler_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['database_crawler_agent'],
+            tools=[DatabaseCrawlerTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def api_crawler_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['api_crawler_agent'],
+            tools=[APICrawlerTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def csv_crawler_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['csv_crawler_agent'],
+            tools=[CSVCrawlerTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def metadata_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['metadata_agent'],
+            tools=[MetadataPersistenceTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def detector_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['detector_agent'],
+            tools=[DriftDetectionTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def healer_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['healer_agent'],
+            tools=[HealingTool()],
+            verbose=True,
+            llm=self.llm
+        )
+
+    @agent
+    def notification_agent(self) -> Agent:
+        return Agent(
+            config=self.agents_config['notification_agent'],
+            tools=[NotificationTool()],
+            verbose=True,
+            llm=self.llm
         )
 
     @task
-    def reporting_task(self) -> Task:
+    def identify_sources(self) -> Task:
         return Task(
-            config=self.tasks_config['reporting_task'], # type: ignore[index]
-            output_file='report.md'
+            config=self.tasks_config['identify_sources'],
+        )
+
+    @task
+    def crawl_database(self) -> Task:
+        return Task(
+            config=self.tasks_config['crawl_database'],
+        )
+
+    @task
+    def crawl_api(self) -> Task:
+        return Task(
+            config=self.tasks_config['crawl_api'],
+        )
+
+    @task
+    def crawl_csv(self) -> Task:
+        return Task(
+            config=self.tasks_config['crawl_csv'],
+        )
+
+    @task
+    def persist_snapshots(self) -> Task:
+        return Task(
+            config=self.tasks_config['persist_snapshots'],
+        )
+
+    @task
+    def detect_drift(self) -> Task:
+        return Task(
+            config=self.tasks_config['detect_drift'],
+        )
+
+    @task
+    def generate_healing(self) -> Task:
+        return Task(
+            config=self.tasks_config['generate_healing'],
+        )
+
+    @task
+    def notify_operator(self) -> Task:
+        return Task(
+            config=self.tasks_config['notify_operator'],
+        )
+
+    @task
+    def finalize_decision(self) -> Task:
+        return Task(
+            config=self.tasks_config['finalize_decision'],
         )
 
     @crew
     def crew(self) -> Crew:
         """Creates the SchemaDriftDetector crew"""
-        # To learn how to add knowledge sources to your crew, check out the documentation:
-        # https://docs.crewai.com/concepts/knowledge#what-is-knowledge
-
         return Crew(
             agents=self.agents, # Automatically created by the @agent decorator
             tasks=self.tasks, # Automatically created by the @task decorator
             process=Process.sequential,
             verbose=True,
-            # process=Process.hierarchical, # In case you wanna use that instead https://docs.crewai.com/how-to/Hierarchical/
         )
