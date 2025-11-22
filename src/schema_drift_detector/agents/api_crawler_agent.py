@@ -38,70 +38,30 @@ class APICrawlerAgent:
         request_id = inputs.get("request_id")
         source_id = inputs.get("source_id")
         entity = inputs.get("entity")
+        source_type = inputs.get("source_type")
         contract_ref = inputs.get("contract_ref")
         options = inputs.get("options") or {}
 
-        logger.info("APICrawlerAgent start request_id=%s source_id=%s entity=%s", request_id, source_id, entity)
+        logger.info("APICrawlerAgent start request_id=%s source_id=%s entity=%s source_type=%s", request_id, source_id, entity, source_type)
 
-        if not contract_ref:
-            logger.warning("No contract_ref provided. Returning empty snapshot.")
+        # Skip if source type is not API
+        if source_type and source_type.lower() != "api":
+            logger.info("Source type is '%s', not api. Skipping API crawler.", source_type)
             return {
                 "request_id": request_id,
                 "source_id": source_id,
                 "entity": entity,
-                "snapshot": {}
+                "skipped": True,
+                "reason": f"Source type is '{source_type}', not api"
             }
 
-        try:
-            spec = self._fetch_spec(contract_ref)
-            
-            # Basic extraction: get models/schemas
-            models = {}
-            components = spec.get("components", {})
-            schemas = components.get("schemas", {})
-            
-            # Also check definitions (Swagger 2.0)
-            if not schemas:
-                schemas = spec.get("definitions", {})
-
-            for name, schema in schemas.items():
-                fields = []
-                properties = schema.get("properties", {})
-                for prop_name, prop_details in properties.items():
-                    fields.append({
-                        "name": prop_name,
-                        "type": prop_details.get("type", "unknown"),
-                        "nullable": not prop_details.get("required", False) # Simplified assumption
-                    })
-                models[name] = {"fields": fields}
-
-            # If entity matches a model name, return that model's fields as the main fields
-            # Otherwise, return all models in the snapshot
-            main_fields = []
-            if entity in models:
-                main_fields = models[entity]["fields"]
-            
-            snapshot = {
-                "source_id": source_id,
-                "entity": entity,
-                "schema": {
-                    "fields": main_fields, # For compatibility with other agents expecting flat fields
-                    "models": models,
-                    "version_meta": {
-                        "created_by": "api_crawler_agent",
-                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "source_path": contract_ref
-                    }
-                }
-            }
-
-            return {
-                "request_id": request_id,
-                "source_id": source_id,
-                "entity": entity,
-                "snapshot": snapshot
-            }
-
-        except Exception as e:
-            logger.error("Failed to crawl API: %s", e)
-            raise
+        # API crawler not implemented yet
+        logger.warning("API crawler agent is not fully implemented yet. Skipping API crawling.")
+        return {
+            "request_id": request_id,
+            "source_id": source_id,
+            "entity": entity,
+            "skipped": True,
+            "not_implemented": True,
+            "reason": "API crawler agent is not fully implemented yet"
+        }

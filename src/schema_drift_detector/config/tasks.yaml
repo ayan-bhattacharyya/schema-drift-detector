@@ -1,78 +1,90 @@
 identify_sources:
   description: >
-    Query the GraphDB integration/catalog to resolve authoritative source(s), entity mappings,
-    and policy metadata for the pipeline identifier.
+    Query the GraphDB integration/catalog to resolve authoritative integration catalog, healing policies,
+    and notification policy metadata for the pipeline identifier provided in the initial request inputs (e.g. 'CRM-To-Finance-PeopleData').
+    DO NOT use the string "pipeline_identifier" as the value. Use the actual pipeline ID passed to the crew.
   expected_output: |
     {
       "pipeline": "<pipeline_name_or_id>",
-      "sources": [
-        { "source_id": "<id>", "type": "<db|api|csv>", "entity": "<entity_name>", "metadata_ref": "<neo4j_node_id_or_props>" },
-        ...
-      ],
-      "policies": { "auto_heal_allowed": <bool>, "notify_rules": { ... } }
+      "integration_catalog": {
+        "source_system": "<system>",
+        "target_system": "<system>",
+        "integration_type": "<type>",
+        "source_type": "<db|api|csv>",
+        "target_type": "<db|api|csv>",
+        "source_component": "<path>",
+        "target_component": "<path>",
+        "created": "<timestamp>",
+        "last_seen": "<timestamp>"
+      },
+      "healing_policy": {
+        "policy_id": "<id>",
+        "pipeline": "<pipeline_name_or_id>",
+        "auto_heal": <bool>,
+        "created": "<timestamp>"
+      },
+      "healing_strategy": {
+        "name": "<high|medium|low>",
+        "description": "<description>",
+        "priority": <int>
+      },
+      "notification_policy": {
+        "policy_id": "<id>",
+        "pipeline": "<pipeline_name_or_id>",
+        "enabled": <bool>,
+        "preferred_channel": ["<email|teams|slack>"],
+        "email": "<email_address>",
+        "teams_channel": "<channel>",
+        "created": "<timestamp>"
+      }
     }
   agent: source_schema_identifier
 
 crawl_database:
   description: >
-    Check the 'sources' list from the 'identify_sources' task output.
-    IF there is a source with type 'db' (or 'database'):
-      Use DB system catalogs / information_schema to build a canonical schema snapshot
-      for the named table/entity. Must not read data rows or sample values.
-    ELSE:
-      Return "Skipped: Source type is not database."
+    [NOT IMPLEMENTED] Check 'integration_catalog.source_type' from the 'identify_sources' task output.
+    If source_type is 'db' or 'database':
+      This agent is not fully implemented yet and will return a skip response with not_implemented flag.
+    Otherwise, skip this task and return a skip response.
   expected_output: |
     {
       "request_id": "<uuid>",
       "source_id": "<source_id>",
       "entity": "<table_name>",
-      "snapshot": {
-        "source_id": "<source_id>",
-        "entity": "<table_name>",
-        "schema": {
-          "fields": [
-            { "name": "<col>", "type": "<type>", "nullable": <bool>, "constraints": { ... } },
-            ...
-          ],
-          "version_meta": { "created_by":"database_crawler_agent", "timestamp":"<ts>" }
-        }
-      }
+      "skipped": true,
+      "not_implemented": true,
+      "reason": "Database crawler agent is not fully implemented yet"
     }
   agent: database_crawler_agent
 
 crawl_api:
   description: >
-    Check the 'sources' list from the 'identify_sources' task output.
-    IF there is a source with type 'api':
-      Parse OpenAPI/Swagger/GraphQL/RAML specs (from contract ref in metadata) and return a canonical contract snapshot.
-      Must not invoke endpoints to sample responses.
-    ELSE:
-      Return "Skipped: Source type is not api."
+    [NOT IMPLEMENTED] Check 'integration_catalog.source_type' from the 'identify_sources' task output.
+    If source_type is 'api':
+      This agent is not fully implemented yet and will return a skip response with not_implemented flag.
+    Otherwise, skip this task and return a skip response.
   expected_output: |
     {
       "request_id": "<uuid>",
       "source_id": "<source_id>",
       "entity": "<resource_or_schema_name>",
-      "snapshot": {
-        "source_id": "<source_id>",
-        "entity": "<resource_or_schema_name>",
-        "schema": {
-          "endpoints": [ ... ],
-          "models": { "<model_name>": { "fields": [ { "name":"<f>", "type":"<t>" }, ... ] } },
-          "version_meta": { "created_by":"api_crawler_agent", "timestamp":"<ts>" }
-        }
-      }
+      "skipped": true,
+      "not_implemented": true,
+      "reason": "API crawler agent is not fully implemented yet"
     }
   agent: api_crawler_agent
 
 crawl_csv:
   description: >
-    Check the 'sources' list from the 'identify_sources' task output.
-    IF there is a source with type 'csv' (or 'file' or 'text'):
+    Check 'integration_catalog.source_type' from the 'identify_sources' task output.
+    If source_type is 'csv', 'file', or 'text':
+      Call the CSV Crawler Tool with:
+      - source_id: integration_catalog.source_component (or basename)
+      - metadata_ref: { "properties": { "source_path": integration_catalog.source_component } }
+      - options: { "header_rows": 1 }
       Inspect CSV/flat-file headers and object metadata (not contents) to build a canonical schema snapshot.
       Must not read or persist data rows or sample values.
-    ELSE:
-      Return "Skipped: Source type is not csv/file."
+    Otherwise, skip this task and return a skip response.
   expected_output: |
     {
       "request_id": "<uuid>",
@@ -94,21 +106,33 @@ crawl_csv:
 
 persist_snapshots:
   description: >
-    Persist one or more canonical snapshots into the GraphDB as a versioned snapshot.
+    Identify which crawler task completed successfully (crawl_csv, crawl_database, or crawl_api) and produced a 'snapshot'.
+    Call the Snapshot Persistence Tool with:
+    - request_id: from the crawler task output
+    - source_id: from the crawler task output
+    - entity: from the crawler task output
+    - snapshot: from the crawler task output 'snapshot' field
+    
     Validate snapshots to ensure they contain only metadata (no PII or sample values).
     CRITICAL: If the storage operation fails, set 'stored': false in the output.
     The workflow MUST raise an error if 'stored' is false.
   expected_output: |
     {
       "request_id": "<uuid>",
-      "snapshot_ids": [ "<snapshot_id1>", "<snapshot_id2>", ... ],
+      "snapshot_id": "<snapshot_id>",
+      "previous_snapshot_id": "<previous_snapshot_id>|null",
       "stored": <bool>,
-      "stored_by": "metadata_agent"
+      "stored_by": "snapshot_persistence_agent"
     }
-  agent: metadata_agent
+  agent: snapshot_persistence_agent
 
 detect_drift:
   description: >
+    Call the Drift Detection Tool with:
+    - snapshot_id: from the 'persist_snapshots' task output 'snapshot_id' field.
+    - previous_snapshot_id: from the 'persist_snapshots' task output 'previous_snapshot_id' field.
+    - pipeline: from the 'identify_sources' task output 'pipeline' field.
+    
     Compare the newly stored snapshot(s) against previous snapshot(s) and produce a drift_report
     describing changes, severity, and short summary. Uses rules-based logic and optional LLM
     augmentation (on metadata-only content).
@@ -154,14 +178,14 @@ generate_healing:
 notify_operator:
   description: >
     CONDITIONAL: Check TWO conditions from previous task outputs:
-    1. Check 'policies.notify_on_breaking' from the 'identify_sources' task output
+    1. Check 'notification_policy.enabled' from the 'identify_sources' task output
     2. Check 'drift_detected' from the 'detect_drift' task output
     
-    IF both 'policies.notify_on_breaking' is true AND 'drift_detected' is true:
+    IF both 'notification_policy.enabled' is true AND 'drift_detected' is true:
       Send a notification to operators according to policy (email, Slack, Teams, webhook).
       Notification must not contain PII or sample values; include safe links/IDs to console.
     ELSE:
-      Return {"request_id": "<uuid>", "skipped": true, "reason": "Notification not required (notify_on_breaking=false or no drift detected)", "sent": false}
+      Return {"request_id": "<uuid>", "skipped": true, "reason": "Notification not required (notification_policy.enabled=false or no drift detected)", "sent": false}
   expected_output: |
     {
       "request_id": "<uuid>",
@@ -181,6 +205,6 @@ finalize_decision:
     {
       "request_id": "<uuid>",
       "decision": "<continue|pause|manual_review|auto_heal>",
-      "details": { "drift": <bool>, "severity": "<info|warning|critical|null>", "snapshot_ids":[...], "healing": {...} }
+      "details": { "drift": <bool>, "severity": "<info|warning|critical|null>", "snapshot_id": "<snapshot_id>", "healing": {...} }
     }
   agent: orchestrator_agent

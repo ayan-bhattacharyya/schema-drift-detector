@@ -112,57 +112,28 @@ class IdentifierInput(BaseModel):
         return v.strip()
 
 # -------------------------
-# Helper queries
+# Helper queries for new schema
 # -------------------------
-# - Get ETL job node and policy props
-JOB_QUERY = """
-MATCH (j:ETLJob {job_id:$job_id})
-RETURN elementId(j) AS element_id, j.job_id AS job_id, j.name AS name,
-       j.auto_heal_allowed AS auto_heal_allowed,
-       j.notify_on_breaking AS notify_on_breaking,
-       j.notify_channels AS notify_channels,
-       j.operator_contact AS operator_contact,
-       properties(j) AS props
+# - Get IntegrationCatalog by pipeline name
+INTEGRATION_CATALOG_QUERY = """
+MATCH (ic:IntegrationCatalog {pipeline: $pipeline})
+RETURN elementId(ic) AS element_id, properties(ic) AS props
 LIMIT 1
 """
 
-# - Get source Entities used by job
-SOURCES_QUERY = """
-MATCH (j:ETLJob {job_id:$job_id})-[:USES_SOURCE]->(s:Entity)
-RETURN elementId(s) AS element_id, s.name AS name, s.type AS type, s.source_path AS source_path, properties(s) AS props
-ORDER BY s.name
+# - Get HealingPolicy and linked HealingStrategy
+HEALING_POLICY_QUERY = """
+MATCH (ic:IntegrationCatalog {pipeline: $pipeline})-[:HAS_HEALING_POLICY]->(hp:HealingPolicy)
+OPTIONAL MATCH (hp)-[:USES_HEALING_STRATEGY]->(hs:HealingStrategy)
+RETURN properties(hp) AS healing_policy, properties(hs) AS healing_strategy
+LIMIT 1
 """
 
-# - Get produced/target Entities
-PRODUCES_QUERY = """
-MATCH (j:ETLJob {job_id:$job_id})-[:PRODUCES]->(p:Entity)
-RETURN elementId(p) AS element_id, p.name AS name, p.type AS type, p.source_path AS source_path, properties(p) AS props
-ORDER BY p.name
-"""
-
-# - Get fields for an entity by name
-FIELDS_QUERY = """
-MATCH (e:Entity {name:$entity_name})-[:HAS_FIELD]->(f:Field)
-RETURN elementId(f) AS element_id, f.field_id AS field_id, f.name AS name, f.data_type AS data_type, f.nullable AS nullable, f.ordinal AS ordinal, properties(f) AS props
-ORDER BY f.ordinal
-"""
-
-# - Get transformations for the job
-TRANSFORMS_QUERY = """
-MATCH (t:Transformation)-[:APPLIES_TO_JOB]->(j:ETLJob {job_id:$job_id})
-RETURN t.transformation_id AS transformation_id, t.mapping_order AS mapping_order,
-       t.source_field AS source_field, t.target_field AS target_field, t.expression AS expression, t.description AS description,
-       properties(t) AS props
-ORDER BY t.mapping_order
-"""
-
-# Optional: get mappings via MAPPED_TO relationships (if you prefer)
-MAPPED_TO_QUERY = """
-MATCH (s:Entity)-[:HAS_FIELD]->(sf:Field)-[m:MAPPED_TO {job_id:$job_id}]->(tf:Field)
-RETURN id(sf) AS src_field_node_id, sf.field_id AS src_field_id, sf.name AS src_name,
-       id(tf) AS target_field_node_id, tf.field_id AS target_field_id, tf.name AS target_name,
-       m.mapping_order AS mapping_order, m.expression AS expression, m
-ORDER BY m.mapping_order
+# - Get NotificationPolicy with all details
+NOTIFICATION_POLICY_QUERY = """
+MATCH (ic:IntegrationCatalog {pipeline: $pipeline})-[:HAS_NOTIFICATION_POLICY]->(np:NotificationPolicy)
+RETURN properties(np) AS notification_policy
+LIMIT 1
 """
 # -------------------------
 # Agent implementation
@@ -198,33 +169,38 @@ class SourceSchemaIdentifierAgent:
                 results.append(row)
         return results
 
-    def _fetch_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        rows = self._run_read(JOB_QUERY, {"job_id": job_id})
+    def _fetch_integration_catalog(self, pipeline: str) -> Optional[Dict[str, Any]]:
+        """Fetch IntegrationCatalog node for the given pipeline."""
+        rows = self._run_read(INTEGRATION_CATALOG_QUERY, {"pipeline": pipeline})
         return rows[0] if rows else None
 
-    def _fetch_sources(self, job_id: str) -> List[Dict[str, Any]]:
-        return self._run_read(SOURCES_QUERY, {"job_id": job_id})
+    def _fetch_healing_policy(self, pipeline: str) -> Dict[str, Any]:
+        """Fetch HealingPolicy and linked HealingStrategy for the given pipeline."""
+        rows = self._run_read(HEALING_POLICY_QUERY, {"pipeline": pipeline})
+        if rows:
+            return {
+                "healing_policy": rows[0].get("healing_policy"),
+                "healing_strategy": rows[0].get("healing_strategy")
+            }
+        return {"healing_policy": None, "healing_strategy": None}
 
-    def _fetch_produces(self, job_id: str) -> List[Dict[str, Any]]:
-        return self._run_read(PRODUCES_QUERY, {"job_id": job_id})
-
-    def _fetch_fields(self, entity_name: str) -> List[Dict[str, Any]]:
-        return self._run_read(FIELDS_QUERY, {"entity_name": entity_name})
-
-    def _fetch_transforms(self, job_id: str) -> List[Dict[str, Any]]:
-        return self._run_read(TRANSFORMS_QUERY, {"job_id": job_id})
+    def _fetch_notification_policy(self, pipeline: str) -> Optional[Dict[str, Any]]:
+        """Fetch NotificationPolicy for the given pipeline."""
+        rows = self._run_read(NOTIFICATION_POLICY_QUERY, {"pipeline": pipeline})
+        return rows[0].get("notification_policy") if rows else None
 
     def run(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Synchronous run method (Crew call_agent supports sync agents).
-        Expected inputs: { "request_id": "<uuid>", "pipeline": "<pipeline_name_or_id>" }
+        Expected inputs: { "request_id": "<uuid>", "pipeline": "<pipeline_name>" }
         Returns:
           {
             "pipeline": "<pipeline>",
-            "sources": [ { source metadata, fields: [...] }, ... ],
-            "produces": [ { entity: "...", fields: [...] }, ... ],
-            "transformations": [ ... ],
-            "policies": { ... }
+            "integration_catalog": { ... },
+            "healing_policy": { ... },
+            "healing_strategy": { ... },
+            "notification_policy": { ... },
+            "request_id": "..."
           }
         """
         try:
@@ -234,92 +210,54 @@ class SourceSchemaIdentifierAgent:
 
             logger.info("Resolving pipeline metadata for pipeline=%s request_id=%s", pipeline, request_id)
 
-            job = self._fetch_job(pipeline)
-            if not job:
-                msg = f"ETLJob with job_id='{pipeline}' not found in metadata store"
+            # Fetch IntegrationCatalog
+            ic = self._fetch_integration_catalog(pipeline)
+            if not ic:
+                msg = f"IntegrationCatalog with pipeline='{pipeline}' not found in metadata store"
                 logger.warning(msg)
-                return {"pipeline": pipeline, "sources": [], "produces": [], "transformations": [], "policies": {} , "error": msg}
+                return {
+                    "pipeline": pipeline,
+                    "integration_catalog": None,
+                    "healing_policy": None,
+                    "healing_strategy": None,
+                    "notification_policy": None,
+                    "error": msg,
+                    "request_id": request_id
+                }
 
-            # Policies: read from job properties, default safe values
-            props = job.get("props") or {}
-            policies = {
-                "auto_heal_allowed": bool(props.get("auto_heal_allowed", False)),
-                "notify_on_breaking": bool(props.get("notify_on_breaking", True)),
-                "notify_channels": props.get("notify_channels", ["email"]),
-                "operator_contact": props.get("operator_contact", None)
+            # Extract integration catalog properties
+            ic_props = ic.get("props") or {}
+            integration_catalog = {
+                "source_system": ic_props.get("source_system"),
+                "target_system": ic_props.get("target_system"),
+                "integration_type": ic_props.get("integration_type"),
+                "source_type": ic_props.get("source_type"),
+                "target_type": ic_props.get("target_type"),
+                "source_component": ic_props.get("source_component"),
+                "target_component": ic_props.get("target_component"),
+                "created": ic_props.get("created"),
+                "last_seen": ic_props.get("last_seen")
             }
 
-            # Sources
-            raw_sources = self._fetch_sources(pipeline)
-            sources = []
-            for s in raw_sources:
-                entity_name = s.get("name")
-                # fetch fields metadata for entity
-                fields_raw = self._fetch_fields(entity_name)
-                fields = []
-                for f in fields_raw:
-                    fields.append({
-                        "field_id": f.get("field_id"),
-                        "name": f.get("name"),
-                        "type": f.get("data_type"),
-                        "nullable": f.get("nullable"),
-                        "ordinal": f.get("ordinal"),
-                    })
-                sources.append({
-                    "source_id": entity_name,
-                    "type": (s.get("type") or "file"),
-                    "entity": entity_name,
-                    "metadata_ref": { "node_id": s.get("node_id"), "properties": s.get("props", {}) },
-                    "fields": fields
-                })
+            # Fetch HealingPolicy and HealingStrategy
+            healing_data = self._fetch_healing_policy(pipeline)
+            healing_policy = healing_data.get("healing_policy")
+            healing_strategy = healing_data.get("healing_strategy")
 
-            # Produces (targets)
-            raw_produces = self._fetch_produces(pipeline)
-            produces = []
-            for p in raw_produces:
-                entity_name = p.get("name")
-                fields_raw = self._fetch_fields(entity_name)
-                fields = []
-                for f in fields_raw:
-                    fields.append({
-                        "field_id": f.get("field_id"),
-                        "name": f.get("name"),
-                        "type": f.get("data_type"),
-                        "nullable": f.get("nullable"),
-                        "ordinal": f.get("ordinal"),
-                    })
-                produces.append({
-                    "entity": entity_name,
-                    "metadata_ref": { "node_id": p.get("node_id"), "properties": p.get("props", {}) },
-                    "fields": fields
-                })
-
-            # Transformations
-            raw_transforms = self._fetch_transforms(pipeline)
-            transformations = []
-            for t in raw_transforms:
-                transformations.append({
-                    "transformation_id": t.get("transformation_id"),
-                    "mapping_order": t.get("mapping_order"),
-                    "source_field": t.get("source_field"),
-                    "target_field": t.get("target_field"),
-                    "expression": t.get("expression"),
-                    "description": t.get("description"),
-                    "metadata": t.get("props", {})
-                })
+            # Fetch NotificationPolicy
+            notification_policy = self._fetch_notification_policy(pipeline)
 
             result = {
                 "pipeline": pipeline,
-                "sources": sources,
-                "produces": produces,
-                "transformations": transformations,
-                "policies": policies,
-                "job_node": { "node_id": job.get("node_id"), "properties": job.get("props", {}) },
+                "integration_catalog": integration_catalog,
+                "healing_policy": healing_policy,
+                "healing_strategy": healing_strategy,
+                "notification_policy": notification_policy,
                 "request_id": request_id
             }
 
-            logger.info("Resolved metadata for pipeline=%s sources=%d produces=%d transforms=%d",
-                        pipeline, len(sources), len(produces), len(transformations))
+            logger.info("Resolved metadata for pipeline=%s, healing_policy=%s, notification_policy=%s",
+                        pipeline, bool(healing_policy), bool(notification_policy))
             return result
 
         except ValidationError as ve:

@@ -4,9 +4,10 @@ orchestrator_agent:
     and sequences the schema-drift workflow (identify -> crawl -> persist -> detect -> heal -> notify).
   goal: >
     Accept { pipeline: "<pipeline_name_or_id>", options: { auto_heal: <bool>, notify_on_breaking: <bool> } }. 
-    The agent delegates the pipeline_name_or_id to { source_schema_identifier } to resolve source types.
-    The agent then conditionally calls the appropriate crawler based on the source types returned by { source_schema_identifier }.
-    The agent then calls { metadata_agent } to persist the snapshot, { detector_agent } to detect drift,
+    The agent delegates the ACTUAL pipeline_name_or_id (e.g. 'CRM-To-Finance-PeopleData') to { source_schema_identifier } to resolve integration catalog, healing policies, and notification policies.
+    DO NOT use the string "pipeline_identifier" as the value.
+    The agent then conditionally calls the appropriate crawler based on the source_type field in the integration_catalog (e.g., 'csv' -> csv_crawler, 'db' -> database_crawler, 'api' -> api_crawler).
+    The agent then calls { snapshot_persistence_agent } to persist the snapshot, { detector_agent } to detect drift,
     { healer_agent } to generate healing actions if drift is detected, and { notification_agent } to alert operators if required.
     Finally it returns a compact decision JSON to the caller.
   backstory: >
@@ -17,37 +18,39 @@ orchestrator_agent:
 
 source_schema_identifier:
   role: >
-    Query the GraphDB integration/catalog to resolve the authoritative source type(s) and entity mapping
-    for the provided pipeline identifier.
+    Query the GraphDB integration/catalog to resolve the authoritative integration catalog, healing policies,
+    and notification policies for the provided pipeline identifier.
   goal: >
     Given { pipeline: "<pipeline_name_or_id>" },
-    return { pipeline: "<pipeline_name_or_id>", sources: [ { source_id: "<id>", type: "<db|api|csv>", entity: "<entity_name>", metadata_ref: "<neo4j_node_id_or_props>" }, ... ], policies: { auto_heal_allowed: <bool>, notify_rules: {...} } }.
+    return { pipeline: "<pipeline_name_or_id>", integration_catalog: { source_system: "<system>", target_system: "<system>", integration_type: "<type>", source_type: "<db|api|csv>", target_type: "<db|api|csv>", source_component: "<path>", target_component: "<path>" }, healing_policy: { policy_id: "<id>", auto_heal: <bool> }, healing_strategy: { name: "<high|medium|low>", description: "<desc>", priority: <int> }, notification_policy: { policy_id: "<id>", enabled: <bool>, preferred_channel: [...], email: "<email>", teams_channel: "<channel>" } }.
   backstory: >
     This agent is responsible for all metadata lookups in Neo4j (catalog, lineage, policies).
     It returns only metadata (no secrets, no sample rows). The orchestrator uses this response
-    to decide which crawler agent(s) to call.
+    to determine healing and notification strategies for the pipeline.
 
 database_crawler_agent:
   role: >
-    Crawl database source types (Postgres, MySQL, SQL Server etc.) to extract schema metadata
+    [NOT IMPLEMENTED] Crawl database source types (Postgres, MySQL, SQL Server etc.) to extract schema metadata
     for a given entity/table and return a canonical schema model.
   goal: >
     Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<table_name>", connection_template_ref: "<metadata_ref>", options: { sample_rows: 0 } },
     return { snapshot: { source_id: "<source_id>", entity: "<table_name>", schema: { fields: [ { name: "<col>", type: "<type>", nullable: <bool>, constraints: {...} }, ... ], version_meta: {...} } } }.
   backstory: >
-    Uses database system catalogs / information_schema only. Does not access/provision any data rows or PII.
+    [NOT IMPLEMENTED] This agent is currently not fully implemented. When called, it will log a warning and return a skip response.
+    In a full implementation, it would use database system catalogs / information_schema only. Does not access/provision any data rows or PII.
     If credentials are required, it uses connection references from the metadata store and a secrets manager,
     but never persists secrets or sample data in snapshots.
 
 api_crawler_agent:
   role: >
-    Crawl API contract sources (OpenAPI/Swagger/RAML, GraphQL schema, or other API specs) and return
+    [NOT IMPLEMENTED] Crawl API contract sources (OpenAPI/Swagger/RAML, GraphQL schema, or other API specs) and return
     a canonical contract model suitable for diffing.
   goal: >
     Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<resource_or_schema_name>", contract_ref: "<metadata_ref>", options: { openapi_merge: <bool> } },
     return { snapshot: { source_id: "<source_id>", entity: "<resource_or_schema_name>", schema: { endpoints: [...], models: { <model_name>: { fields: [...] } }, version_meta: {...} } } }.
   backstory: >
-    Parses contract/spec artifacts only (e.g., OpenAPI JSON/YAML). Does not invoke endpoints to sample live responses or capture PII.
+    [NOT IMPLEMENTED] This agent is currently not fully implemented. When called, it will log a warning and return a skip response.
+    In a full implementation, it would parse contract/spec artifacts only (e.g., OpenAPI JSON/YAML). Does not invoke endpoints to sample live responses or capture PII.
     Merges multi-file specs per policy and normalises model/type names into the canonical schema.
 
 csv_crawler_agent:
@@ -60,21 +63,22 @@ csv_crawler_agent:
     Only reads headers and metadata stores about files. It must not read or persist data rows or PII.
     For cloud object stores, it reads object metadata (schema hints) rather than object contents.
 
-metadata_agent:
+snapshot_persistence_agent:
   role: >
-    Persist canonical schema snapshots and maintain schema version history and lineage in the GraphDB (Neo4j).
+    Persist canonical schema snapshots and maintain schema version history in the GraphDB (Neo4j).
   goal: >
-    Given { request_id: "<uuid>", snapshot: { source_id: "<source_id>", entity: "<entity>", schema: { ... }, version_meta: { created_by: "<agent>", timestamp: "<ts>" } } },
+    Given { request_id: "<uuid>", source_id: "<source_id>", entity: "<entity>", snapshot: { ... } },
     store snapshot as { snapshot_id: "<uuid>" } and ensure lineage and snapshot history are queryable by { previous_snapshot_id, impacted_pipelines }.
   backstory: >
-    Manages the authoritative schema history. Validates incoming snapshots to ensure they contain only schema metadata
-    (fields, types, nullability, descriptions) and never include sample values or PII.
+    Manages the authoritative schema history by persisting Snapshot nodes with HAS_FIELD relationships to SnapshotField nodes.
+    Validates incoming snapshots to ensure they contain only schema metadata (fields, types, nullability, descriptions) and never include sample values or PII.
+    Links snapshots to IntegrationCatalog via COVERS_COMPONENT relationships and maintains PREVIOUS_SNAPSHOT version chains.
 
 detector_agent:
   role: >
     Compare the newly stored snapshot to previous snapshot(s) and produce a structured drift report.
   goal: >
-    Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>", previous_snapshot_id: "<previous_snapshot_id>|null", options: { severity_ruleset: "<name>", use_llm: <bool> } },
+    Given { request_id: "<uuid>", snapshot_id: "<snapshot_id>", previous_snapshot_id: "<previous_snapshot_id>|null", pipeline: "<pipeline_name_or_id>" },
     return { drift_report: { drift_detected: <bool>, changes: [ { op: "<add|remove|change>", field: "<name>", before: {...}, after: {...}, severity: "<low|medium|high>" }, ... ], summary: "..." } }.
   backstory: >
     Runs deterministic diffs and optional LLM-assisted heuristics (on metadata-only content) to classify breaking vs non-breaking changes.

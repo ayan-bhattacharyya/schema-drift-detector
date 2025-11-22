@@ -8,7 +8,7 @@ from schema_drift_detector.agents.source_schema_identifier_agent import SourceSc
 from schema_drift_detector.agents.csv_crawler_agent import CSVCrawlerAgent
 from schema_drift_detector.agents.database_crawler_agent import DatabaseCrawlerAgent
 from schema_drift_detector.agents.api_crawler_agent import APICrawlerAgent
-from schema_drift_detector.agents.metadata_agent import MetadataAgent
+from schema_drift_detector.agents.snapshot_persistence_agent import SnapshotPersistenceAgent
 from schema_drift_detector.agents.detector_agent import DetectorAgent
 from schema_drift_detector.agents.healer_agent import HealerAgent
 from schema_drift_detector.agents.notification_agent import NotificationAgent
@@ -41,6 +41,7 @@ class CSVCrawlerInput(BaseModel):
     request_id: str = Field(..., description="Unique request ID.")
     source_id: str = Field(..., description="Source identifier.")
     entity: Optional[str] = Field(None, description="Entity name.")
+    source_type: Optional[str] = Field(None, description="Source type (csv, file, text).")
     metadata_ref: Optional[Dict[str, Any]] = Field(default={}, description="Metadata reference containing source path properties.")
     options: Optional[Dict[str, Any]] = Field(default={}, description="Options like header_rows.")
 
@@ -52,12 +53,13 @@ class CSVCrawlerTool(BaseTool):
     )
     args_schema: Type[BaseModel] = CSVCrawlerInput
 
-    def _run(self, request_id: str, source_id: str, entity: Optional[str] = None, metadata_ref: Optional[Dict[str, Any]] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _run(self, request_id: str, source_id: str, entity: Optional[str] = None, source_type: Optional[str] = None, metadata_ref: Optional[Dict[str, Any]] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         agent = CSVCrawlerAgent()
         inputs = {
             "request_id": request_id,
             "source_id": source_id,
             "entity": entity,
+            "source_type": source_type,
             "metadata_ref": metadata_ref or {},
             "options": options or {}
         }
@@ -69,6 +71,7 @@ class DatabaseCrawlerInput(BaseModel):
     request_id: str = Field(..., description="Unique request ID.")
     source_id: str = Field(..., description="Source identifier.")
     entity: str = Field(..., description="Table or entity name.")
+    source_type: Optional[str] = Field(None, description="Source type (db, database).")
     connection_template_ref: Optional[str] = Field(None, description="Reference to connection template.")
     options: Optional[Dict[str, Any]] = Field(default={}, description="Options.")
 
@@ -80,12 +83,13 @@ class DatabaseCrawlerTool(BaseTool):
     )
     args_schema: Type[BaseModel] = DatabaseCrawlerInput
 
-    def _run(self, request_id: str, source_id: str, entity: str, connection_template_ref: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _run(self, request_id: str, source_id: str, entity: str, source_type: Optional[str] = None, connection_template_ref: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         agent = DatabaseCrawlerAgent()
         inputs = {
             "request_id": request_id,
             "source_id": source_id,
             "entity": entity,
+            "source_type": source_type,
             "connection_template_ref": connection_template_ref,
             "options": options or {}
         }
@@ -101,6 +105,7 @@ class APICrawlerInput(BaseModel):
     request_id: str = Field(..., description="Unique request ID.")
     source_id: str = Field(..., description="Source identifier.")
     entity: str = Field(..., description="Resource or schema name.")
+    source_type: Optional[str] = Field(None, description="Source type (api).")
     contract_ref: Optional[str] = Field(None, description="Reference to API contract.")
     options: Optional[Dict[str, Any]] = Field(default={}, description="Options.")
 
@@ -112,19 +117,20 @@ class APICrawlerTool(BaseTool):
     )
     args_schema: Type[BaseModel] = APICrawlerInput
 
-    def _run(self, request_id: str, source_id: str, entity: str, contract_ref: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _run(self, request_id: str, source_id: str, entity: str, source_type: Optional[str] = None, contract_ref: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         agent = APICrawlerAgent()
         inputs = {
             "request_id": request_id,
             "source_id": source_id,
             "entity": entity,
+            "source_type": source_type,
             "contract_ref": contract_ref,
             "options": options or {}
         }
         return agent.run(inputs)
 
 
-# --- Metadata Persistence Tool ---
+# --- Snapshot Persistence Tool ---
 class MetadataPersistenceInput(BaseModel):
     request_id: str = Field(..., description="Unique request ID.")
     source_id: str = Field(..., description="Source identifier.")
@@ -132,7 +138,7 @@ class MetadataPersistenceInput(BaseModel):
     snapshot: Dict[str, Any] = Field(..., description="The canonical schema snapshot to persist.")
 
 class MetadataPersistenceTool(BaseTool):
-    name: str = "Metadata Persistence Tool"
+    name: str = "Snapshot Persistence Tool"
     description: str = (
         "Persists canonical schema snapshots into the GraphDB. "
         "Returns the stored snapshot ID and previous snapshot ID."
@@ -140,7 +146,7 @@ class MetadataPersistenceTool(BaseTool):
     args_schema: Type[BaseModel] = MetadataPersistenceInput
 
     def _run(self, request_id: str, source_id: str, entity: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        agent = MetadataAgent()
+        agent = SnapshotPersistenceAgent()
         inputs = {
             "request_id": request_id,
             "source_id": source_id,
@@ -160,7 +166,6 @@ class DriftDetectionInput(BaseModel):
     snapshot_id: str = Field(..., description="Current snapshot ID.")
     previous_snapshot_id: Optional[str] = Field(None, description="Previous snapshot ID.")
     pipeline: str = Field(..., description="Pipeline identifier for scoped detection.")
-    options: Optional[Dict[str, Any]] = Field(default={}, description="Options like use_llm.")
 
 class DriftDetectionTool(BaseTool):
     name: str = "Drift Detection Tool"
@@ -170,14 +175,13 @@ class DriftDetectionTool(BaseTool):
     )
     args_schema: Type[BaseModel] = DriftDetectionInput
 
-    def _run(self, request_id: str, snapshot_id: str, pipeline: str, previous_snapshot_id: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _run(self, request_id: str, snapshot_id: str, pipeline: str, previous_snapshot_id: Optional[str] = None) -> Dict[str, Any]:
         agent = DetectorAgent()
         inputs = {
             "request_id": request_id,
             "snapshot_id": snapshot_id,
             "previous_snapshot_id": previous_snapshot_id,
-            "pipeline": pipeline,
-            "options": options or {}
+            "pipeline": pipeline
         }
         try:
             return agent.run(inputs)

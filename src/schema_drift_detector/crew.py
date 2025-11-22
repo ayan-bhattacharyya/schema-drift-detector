@@ -25,10 +25,10 @@ class SchemaDriftDetector():
     def __init__(self):
         # Initialize Gemini LLM
         # Ensure GEMINI_API_KEY and GEMINI_MODEL are set in environment
-        self.llm = LLM(
-            model=f"gemini/{os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')}",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
+            self.llm = LLM(
+                model=f"gemini/{os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')}",
+                api_key=os.getenv("GEMINI_API_KEY")
+            )
 
     @agent
     def orchestrator_agent(self) -> Agent:
@@ -76,9 +76,9 @@ class SchemaDriftDetector():
         )
 
     @agent
-    def metadata_agent(self) -> Agent:
+    def snapshot_persistence_agent(self) -> Agent:
         return Agent(
-            config=self.agents_config['metadata_agent'],
+            config=self.agents_config['snapshot_persistence_agent'],
             tools=[MetadataPersistenceTool()],
             verbose=True,
             llm=self.llm

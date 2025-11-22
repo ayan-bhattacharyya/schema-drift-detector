@@ -234,12 +234,24 @@ class CSVCrawlerAgent:
         request_id = inputs.get("request_id")
         source_id = inputs.get("source_id")
         entity = inputs.get("entity") or source_id
+        source_type = inputs.get("source_type")
         metadata_ref = inputs.get("metadata_ref") or {}
         options = inputs.get("options") or {}
         header_rows = int(options.get("header_rows", 1))
         max_bytes = int(options.get("max_bytes", DEFAULT_MAX_BYTES))
 
-        logger.info("CSV Crawler start request_id=%s source_id=%s entity=%s", request_id, source_id, entity)
+        logger.info("CSV Crawler start request_id=%s source_id=%s entity=%s source_type=%s", request_id, source_id, entity, source_type)
+
+        # Skip if source type is not csv/file/text
+        if source_type and source_type.lower() not in ["csv", "file", "text"]:
+            logger.info("Source type is '%s', not csv/file/text. Skipping CSV crawler.", source_type)
+            return {
+                "request_id": request_id,
+                "source_id": source_id,
+                "entity": entity,
+                "skipped": True,
+                "reason": f"Source type is '{source_type}', not csv/file/text"
+            }
 
         descriptor = _resolve_source_descriptor(metadata_ref, source_id)
         if not descriptor:

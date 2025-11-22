@@ -101,9 +101,9 @@ class DetectorAgent:
     # --- Neo4j fetchers -------------------------------------------------
     def _tx_fetch_snapshot(self, tx, snapshot_id: str) -> Optional[Dict[str, Any]]:
         """
-        CHANGED: Robust fetch of Snapshot and its SnapshotField copies.
+        Robust fetch of Snapshot and its SnapshotField nodes.
         - Use consistent alias 'fields' in the Cypher so python looks it up correctly.
-        - Tolerant to properties like 'source' vs 'source_id' and SnapshotField shapes.
+        - Tolerant to properties like 'source' vs 'source_id', 'entity' vs 'component', and SnapshotField shapes.
         - Logs returned row keys for debugging.
         """
         if not snapshot_id:
@@ -111,11 +111,11 @@ class DetectorAgent:
 
         q = """
         MATCH (snap:Snapshot {id:$snapshot_id})
-        OPTIONAL MATCH (snap)-[:HAS_FIELD_COPY]->(sf:SnapshotField)
+        OPTIONAL MATCH (snap)-[:HAS_FIELD]->(sf:SnapshotField)
         RETURN
            snap.id AS snapshot_id,
            coalesce(snap.source_id, snap.source) AS source_id,
-           coalesce(snap.entity, snap.source) AS entity,
+           coalesce(snap.entity, snap.component, snap.source) AS entity,
            snap.timestamp AS timestamp,
            snap.created_by AS created_by,
            snap.source_path AS source_path,
@@ -203,47 +203,7 @@ class DetectorAgent:
         with self._driver.session(**session_kwargs) as session:
             return session.execute_read(self._tx_fetch_snapshot, snapshot_id)
 
-    def _tx_fetch_transformations_for_pipeline(self, tx, entity_name: str, pipeline: str):
-        """
-        Fetch only transformations that belong to the specified pipeline (job_id).
-        This keeps the detection pipeline-scoped.
-        """
-        q = """
-        MATCH (job:ETLJob {job_id:$pipeline})-[:APPLIES_TO_JOB]->(t:Transformation)
-        OPTIONAL MATCH (t)-[:MAPS_SOURCE]->(sf:Field)
-        OPTIONAL MATCH (t)-[:MAPS_TARGET]->(tf:Field)
-        RETURN job.job_id AS job_id, t.transformation_id AS transformation_id, t.mapping_order AS mapping_order,
-               t.source_field AS source_field, t.target_field AS target_field, t.expression AS expression, t.description AS transform_desc
-        ORDER BY t.mapping_order
-        """
-        res = tx.run(q, entity_name=entity_name, pipeline=pipeline)
-        out = []
-        for r in res:
-            out.append({k: _serialize_value(r.get(k)) for k in r.keys()})
-        return out
 
-    def _fetch_transformations_for_pipeline(self, entity_name: Optional[str], pipeline: Optional[str]) -> List[Dict[str, Any]]:
-        if not entity_name or not pipeline:
-            return []
-        session_kwargs = {"database": NEO4J_DB} if NEO4J_DB else {}
-        with self._driver.session(**session_kwargs) as session:
-            return session.execute_read(self._tx_fetch_transformations_for_pipeline, entity_name, pipeline)
-
-    def _tx_check_pipeline_uses_entity(self, tx, entity_name: str, pipeline: str) -> bool:
-        q = """
-        MATCH (job:ETLJob {job_id:$pipeline})-[:USES_SOURCE|:PRODUCES]->(e:Entity {name:$entity_name})
-        RETURN count(job) AS cnt
-        """
-        r = tx.run(q, entity_name=entity_name, pipeline=pipeline)
-        row = r.single()
-        return bool(row and row["cnt"] and int(row["cnt"]) > 0)
-
-    def _pipeline_uses_entity(self, entity_name: Optional[str], pipeline: Optional[str]) -> bool:
-        if not entity_name or not pipeline:
-            return False
-        session_kwargs = {"database": NEO4J_DB} if NEO4J_DB else {}
-        with self._driver.session(**session_kwargs) as session:
-            return session.execute_read(self._tx_check_pipeline_uses_entity, entity_name, pipeline)
 
     # --- LLM call ------------------------------------------------------
     def _call_llm(self, prompt: str) -> Optional[Dict[str, Any]]:
@@ -382,12 +342,9 @@ class DetectorAgent:
     def _build_prompt(self,
                     pipeline: str,
                     before: Optional[Dict[str, Any]],
-                    after: Optional[Dict[str, Any]],
-                    transformations: List[Dict[str, Any]],
-                    pipeline_uses_entity: bool) -> str:
+                    after: Optional[Dict[str, Any]]) -> str:
         """
         Improved LLM prompt with few-shot examples.
-        Replace the existing _build_prompt with this function.
         This function uses deterministic instructions + 4 few-shot JSON examples
         that strongly bias the model toward returning strictly-formed JSON.
 
@@ -395,8 +352,6 @@ class DetectorAgent:
         - pipeline: pipeline/job id (string)
         - before: snapshot BEFORE (metadata-only dict or None)
         - after: snapshot AFTER (metadata-only dict or None)
-        - transformations: list of transformation mappings for THIS pipeline
-        - pipeline_uses_entity: bool
         """
         # helper to pretty-print provided JSON blocks
         before_json = json.dumps({
@@ -417,9 +372,7 @@ class DetectorAgent:
             ]
         }, indent=2)
 
-        trans_json = json.dumps(transformations or [], indent=2)
-
-        # Few-shot examples (4 concise examples demonstrating add/remove/change + transformation bump)
+        # Few-shot examples (4 concise examples demonstrating add/remove/change)
         few_shot = r"""
     EXAMPLE 1 — Addition (must be reported)
     Before:
@@ -437,7 +390,6 @@ class DetectorAgent:
         {"name":"country","type":"string","nullable":true,"ordinal":1}
     ]
     }
-    Transformations: []
     Expected output:
     {
     "request_id": "EX-ADD-1",
@@ -458,7 +410,7 @@ class DetectorAgent:
     }
     }
 
-    EXAMPLE 2 — Removal used in a transformation (critical)
+    EXAMPLE 2 — Removal (critical)
     Before:
     {
     "entity":"people-info.csv",
@@ -474,9 +426,6 @@ class DetectorAgent:
         {"name":"date_of_birth","type":"date","nullable":false,"ordinal":1}
     ]
     }
-    Transformations: [
-    {"source_field": "name", "target_field": "firstname", "expression":"..."}
-    ]
     Expected output:
     {
     "request_id": "EX-REMOVE-1",
@@ -489,7 +438,7 @@ class DetectorAgent:
             "before": {"name":"name","type":"string","nullable":false,"ordinal":0},
             "after": null,
             "severity": "critical",
-            "notes": "field removed and used by transformations for this pipeline"
+            "notes": "field removed"
         }
         ],
         "summary": "remove name (critical)",
@@ -508,7 +457,6 @@ class DetectorAgent:
     "entity":"people-info.csv",
     "fields":[{"name":"age","type":"string","nullable":true,"ordinal":2}]
     }
-    Transformations: []
     Expected output:
     {
     "request_id": "EX-TYPE-1",
@@ -529,7 +477,7 @@ class DetectorAgent:
     }
     }
 
-    EXAMPLE 4 — Nullable + ordinal change, participates in transform (bumped -> critical)
+    EXAMPLE 4 — Nullable + ordinal change (medium)
     Before:
     {
     "entity":"people-info.csv",
@@ -540,9 +488,6 @@ class DetectorAgent:
     "entity":"people-info.csv",
     "fields":[{"name":"company","type":"string","nullable":false,"ordinal":4}]
     }
-    Transformations: [
-    {"source_field":"company","target_field":"company","expression":"..."}
-    ]
     Expected output:
     {
     "request_id": "EX-CHANGE-1",
@@ -554,12 +499,12 @@ class DetectorAgent:
             "field": "company",
             "before": {"name":"company","type":"string","nullable":true,"ordinal":3},
             "after": {"name":"company","type":"string","nullable":false,"ordinal":4},
-            "severity": "critical",
-            "notes": "nullable changed (nullable->non-nullable) and ordinal changed; field participates in pipeline transformations -> bump severity"
+            "severity": "high",
+            "notes": "nullable changed (nullable->non-nullable) and ordinal changed"
         }
         ],
-        "summary": "change company (critical)",
-        "severity": "critical"
+        "summary": "change company (high)",
+        "severity": "warning"
     }
     }
     """
@@ -582,30 +527,26 @@ class DetectorAgent:
             "3) If any structural difference exists between the before and after snapshots' fields arrays, you MUST set drift_detected:true and include a change entry for each difference (add/remove/change).\n"
             "4) Compare field names case-insensitively. Treat lists as sets for add/remove detection (ignore ordering for add/remove), but still report ordinal changes as a 'change'.\n"
             "5) Include at least {\"name\",\"type\",\"nullable\",\"ordinal\"} in before/after field meta; DO NOT include sample data.\n\n"
-            "Severity mapping (pipeline-scoped):\n"
-            "- Field REMOVAL: 'critical' if removed field participates in any transformation for THIS pipeline; otherwise 'high'.\n"
+            "Severity mapping:\n"
+            "- Field REMOVAL: 'critical'.\n"
             "- Field TYPE CHANGE -> 'high'.\n"
             "- Nullability: nullable->non-nullable => 'high'; non-nullable->nullable => 'medium'.\n"
-            "- Ordinal only -> 'low', unless field participates in a transformation for THIS pipeline then 'medium'.\n"
-            "- Field ADDITION -> 'low' generally; if required by or conflicting with THIS pipeline mapping -> 'medium'.\n\n"
-            "Transformation bump rule: After computing base severity, bump one level (low->medium->high->critical) if the field participates in ANY transformation for THIS pipeline (source or target), unless already 'critical'.\n\n"
+            "- Ordinal only -> 'low'.\n"
+            "- Field ADDITION -> 'low'.\n\n"
             "Overall drift_report.severity: 'critical' if any change is 'critical' or any removal is 'critical'; else 'warning' if any change is 'high'; else 'info'.\n\n"
             "Now follow the examples above and then analyze the provided CASE (below). Return EXACTLY ONE JSON object following the schema.\n\n"
         )
 
-        # Compose final prompt: examples first, then instructions, then the CASE (the real before/after/transformations)
+        # Compose final prompt: examples first, then instructions, then the CASE (the real before/after)
         parts = [
             few_shot,
             instructions,
-            "---- CONTEXT (evaluate impact ONLY for this pipeline) ----",
+            "---- CONTEXT ----",
             f"Pipeline: {pipeline}",
-            f"Pipeline uses entity: {bool(pipeline_uses_entity)}",
             "\n---- BEFORE ----",
             before_json,
             "\n---- AFTER ----",
             after_json,
-            "\n---- TRANSFORMATIONS (ONLY for this pipeline) ----",
-            trans_json,
             "\n---- END CONTEXT ----",
             "\nReturn only the single JSON object (no commentary)."
         ]
@@ -615,51 +556,36 @@ class DetectorAgent:
 
 
     # --- fallback deterministic diff (pipeline-scoped) -----------------
-    def _fallback_diff(self, before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]], transformations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _fallback_diff(self, before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Conservative deterministic diff that only considers the provided transformations (pipeline-scoped).
+        Conservative deterministic diff.
         """
         before_map = { (f["name"] or "").lower(): f for f in (before.get("fields") if before else []) }
         after_map = { (f["name"] or "").lower(): f for f in (after.get("fields") if after else []) }
         changes = []
 
-        def participates_in_pipeline(field_name: str) -> bool:
-            fn = field_name or ""
-            for t in transformations:
-                sf = (t.get("source_field") or "") or ""
-                tf = (t.get("target_field") or "") or ""
-                if fn == (sf or "").lower() or fn == (tf or "").lower() or fn == (t.get("source_field") or "").lower() or fn == (t.get("target_field") or "").lower():
-                    return True
-            return False
-
         # removed and changed
         for k, bf in before_map.items():
             af = after_map.get(k)
             if not af:
-                severity = "critical" if participates_in_pipeline(bf.get("name") or "") else "high"
-                changes.append({"op": "remove", "field": bf.get("name"), "before": bf, "after": None, "severity": severity, "notes": "field removed (fallback, pipeline-scoped)"})
+                severity = "critical"
+                changes.append({"op": "remove", "field": bf.get("name"), "before": bf, "after": None, "severity": severity, "notes": "field removed"})
             else:
                 # type change
                 if (bf.get("type") or "").lower() != (af.get("type") or "").lower():
                     sev = "high"
-                    if participates_in_pipeline(bf.get("name") or "") and sev != "critical":
-                        # bump
-                        sev = "critical" if sev == "high" else sev
-                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "type changed (fallback)"})
+                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "type changed"})
                 elif bool(bf.get("nullable")) != bool(af.get("nullable")):
                     sev = "high" if (bf.get("nullable") and not af.get("nullable")) else "medium"
-                    if participates_in_pipeline(bf.get("name") or "") and sev != "critical":
-                        # bump one level
-                        sev = "critical" if sev == "high" else ("high" if sev == "medium" else sev)
-                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "nullable changed (fallback)"})
+                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "nullable changed"})
                 elif int(bf.get("ordinal") or 0) != int(af.get("ordinal") or 0):
-                    sev = "medium" if participates_in_pipeline(bf.get("name") or "") else "low"
-                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "ordinal changed (fallback)"})
+                    sev = "low"
+                    changes.append({"op": "change", "field": bf.get("name"), "before": bf, "after": af, "severity": sev, "notes": "ordinal changed"})
         # additions
         for k, af in after_map.items():
             if k not in before_map:
-                sev = "medium" if participates_in_pipeline(af.get("name") or "") else "low"
-                changes.append({"op": "add", "field": af.get("name"), "before": None, "after": af, "severity": sev, "notes": "field added (fallback)"})
+                sev = "low"
+                changes.append({"op": "add", "field": af.get("name"), "before": None, "after": af, "severity": sev, "notes": "field added"})
 
         drift_detected = len(changes) > 0
         overall = "info"
@@ -715,22 +641,15 @@ class DetectorAgent:
         if snapshot_after is None:
             raise ValueError(f"Snapshot not found: {snapshot_id}")
 
-        entity = snapshot_after.get("entity") or (snapshot_before.get("entity") if snapshot_before else None)
-
-        # Determine whether the pipeline actually uses/produces this entity. If not, still run diff
-        pipeline_uses_entity = self._pipeline_uses_entity(entity, pipeline)
-
-        # fetch only transformations that belong to this pipeline
-        transformations = self._fetch_transformations_for_pipeline(entity, pipeline) if pipeline_uses_entity else []
-
-        # For returned impacted_jobs, we keep it pipeline-scoped: return pipeline if it uses the entity, else empty list
-        impacted_jobs = [pipeline] if pipeline_uses_entity else []
-
+        # Check env var for LLM usage (default to False if not set)
+        use_llm_env = os.getenv("USE_GEMINI", "false").lower() == "true"
+        
         # Build prompt and call LLM (if requested)
-        prompt = self._build_prompt(pipeline, snapshot_before, snapshot_after, transformations, pipeline_uses_entity)
+        prompt = self._build_prompt(pipeline, snapshot_before, snapshot_after)
         llm_response = None
         parsed_json = None
-        if use_llm:
+        out = None
+        if use_llm_env:
             logger.info("DetectorAgent: calling LLM for drift detection with prompt: %s", prompt)
             # call LLM
             llm_response = self._call_llm(prompt)
@@ -795,13 +714,8 @@ class DetectorAgent:
             try:
                 out = {
                     "request_id": parsed_json.get("request_id") or request_id,
-                    "drift_detected": bool(parsed_json.get("drift_detected") or (drift_report and len(drift_report.get("changes", [])) > 0)),
-                    "drift_report": {
-                        "changes": drift_report.get("changes", []) if drift_report else parsed_json.get("changes", []),
-                        "summary": (drift_report.get("summary") if drift_report else parsed_json.get("summary")) or "",
-                        "severity": (drift_report.get("severity") if drift_report else parsed_json.get("severity")) or "info"
-                    },
-                    "impacted_jobs": impacted_jobs,
+                    "drift_detected": parsed_json.get("drift_detected", False),
+                    "drift_report": parsed_json.get("drift_report", {}),
                     "detected_by": "detector_agent_llm"
                 }
                 normalized_changes = []
@@ -816,17 +730,22 @@ class DetectorAgent:
                     })
                 out["drift_report"]["changes"] = normalized_changes
                 logger.info("DetectorAgent: LLM produced %d changes (request_id=%s)", len(normalized_changes), request_id)
-                return out
             except Exception:
                 logger.exception("Parsed LLM JSON invalid shape; falling back to deterministic diff")
 
-        # fallback
-        fallback = self._fallback_diff(snapshot_before, snapshot_after, transformations)
-        fallback["request_id"] = request_id
-        fallback["impacted_jobs"] = impacted_jobs
-        fallback["detected_by"] = "detector_agent_fallback"
-        logger.info("DetectorAgent: returning fallback diff (request_id=%s)", request_id)
-        return fallback
+        # Fallback deterministic diff
+        if not out or not out["drift_detected"]:
+            logger.info("LLM did not detect drift or was not used; running fallback deterministic diff")
+            fallback = self._fallback_diff(snapshot_before, snapshot_after)
+            out = fallback
+
+        out["request_id"] = request_id
+        # out["impacted_jobs"] = impacted_jobs # This is not available here
+        if out["detected_by"] == "detector_agent_fallback":
+            logger.info("DetectorAgent: returning fallback diff (request_id=%s)", request_id)
+        else:
+            logger.info("DetectorAgent: returning LLM diff (request_id=%s)", request_id)
+        return out
 
 
 # quick CLI dev invocation

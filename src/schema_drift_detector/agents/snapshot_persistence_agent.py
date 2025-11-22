@@ -1,4 +1,4 @@
-# src/schema_drift/agents/metadata_agent.py
+# src/schema_drift/agents/snapshot_persistence_agent.py
 from __future__ import annotations
 
 import os
@@ -16,7 +16,7 @@ try:
 except Exception:  # pragma: no cover - defensive fallback
     Neo4jError = Exception
 
-logger = logging.getLogger("metadata_agent")
+logger = logging.getLogger("snapshot_persistence_agent")
 logger.setLevel(logging.INFO)
 if not logger.hasHandlers():
     ch = logging.StreamHandler()
@@ -42,7 +42,6 @@ NEO4J_DB = get_env("NEO4J_DB", required=True)
 
 
 def _driver():
-    # If NEO4J_DB is provided the session can specify database=NEO4J_DB when opening
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
@@ -69,14 +68,14 @@ def _ensure_no_forbidden(o: Any) -> None:
             _ensure_no_forbidden(itm)
 
 
-class MetadataAgent:
+class SnapshotPersistenceAgent:
     """
-    Metadata agent persists canonical snapshots into Neo4j and manages version links.
+    Snapshot persistence agent persists canonical snapshots into Neo4j and manages version links.
+    Updated to work with new schema: Snapshot nodes with HAS_FIELD relationships, IntegrationCatalog instead of ETLJob.
     """
 
     def __init__(self) -> None:
         logger.info("Connecting to Neo4j at %s", NEO4J_URI)
-        # create driver
         self._driver = _driver()
 
     def close(self) -> None:
@@ -87,7 +86,7 @@ class MetadataAgent:
 
     def persist_snapshot(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Persist snapshot payload and return metadata including snapshot id and impacted jobs.
+        Persist snapshot payload and return metadata including snapshot id and impacted pipelines.
 
         payload must include:
         - request_id (optional)
@@ -143,12 +142,13 @@ class MetadataAgent:
             "request_id": request_id,
             "snapshot_id": snapshot_id,
             "previous_snapshot_id": result.get("previous_snapshot_id"),
-            "impacted_jobs": result.get("impacted_jobs", []),
+            "impacted_pipelines": result.get("impacted_pipelines", []),
             "stored": True,
             "created_by": created_by,
             "timestamp": timestamp,
         }
-        logger.info("Persisted snapshot snapshot_id=%s entity=%s impacted_jobs=%d", snapshot_id, entity_name, len(response["impacted_jobs"]))
+        logger.info("Persisted snapshot snapshot_id=%s entity=%s impacted_pipelines=%d", 
+                   snapshot_id, entity_name, len(response["impacted_pipelines"]))
         return response
 
     @staticmethod
@@ -162,55 +162,40 @@ class MetadataAgent:
                              source_path: Optional[str]) -> Dict[str, Any]:
         """
         Transaction body (executed inside a single DB transaction):
-         1) Ensure Entity node exists (MERGE by name)
-         2) Identify previous snapshot id for this entity (if any)
-         3) Create Snapshot node
-         4) Bulk-create SnapshotField nodes using UNWIND and link them to the Snapshot (bulk, safe)
-         5) Create HAS_ENTITY relationship and OPTIONAL PREVIOUS_SNAPSHOT relationship
-         6) Find impacted ETLJob nodes and return summary
+         1) Identify previous snapshot id for this component (if any)
+         2) Create Snapshot node
+         3) Bulk-create SnapshotField nodes using UNWIND and link them to the Snapshot
+         4) Create PREVIOUS_SNAPSHOT relationship if applicable
+         5) Find impacted IntegrationCatalog (pipelines) and return summary
         """
 
-        # 1) Ensure entity exists (create placeholder if missing)
-        q_entity_merge = """
-        MERGE (e:Entity {name: $entity_name})
-          ON CREATE SET e.type = coalesce($entity_type, 'file'), e.created = datetime()
-          ON MATCH SET e.last_seen = datetime()
-        RETURN id(e) AS entity_node_id, e.name AS entity_name
-        """
-        rec = tx.run(q_entity_merge, entity_name=entity_name, entity_type="file")
-        row = rec.single()
-        if not row:
-            raise RuntimeError("Failed to MERGE Entity node")
-        entity_node_id = row["entity_node_id"]
-
-        # 2) Identify previous snapshot for this entity if any (most recent by timestamp)
+        # 1) Identify previous snapshot for this component if any (most recent by timestamp)
+        # Match by component name (entity_name)
         q_prev = """
-        MATCH (s:Snapshot)-[:HAS_ENTITY]->(e:Entity {name: $entity_name})
+        MATCH (s:Snapshot {component: $component})
         RETURN s.id AS snapshot_id, s.timestamp AS ts
         ORDER BY s.timestamp DESC
         LIMIT 1
         """
-        prev = tx.run(q_prev, entity_name=entity_name)
+        prev = tx.run(q_prev, component=entity_name)
         prev_row = prev.single()
         previous_snapshot_id = prev_row["snapshot_id"] if prev_row else None
 
-        # 3) Create Snapshot node (timestamp is ISO string -> datetime($timestamp))
+        # 2) Create Snapshot node
         q_create_snapshot = """
         CREATE (snap:Snapshot {
             id: $snapshot_id,
-            source_id: $source_id,
-            entity: $entity_name,
+            component: $component,
+            source_path: $source_path,
             timestamp: datetime($timestamp),
-            created_by: $created_by,
-            source_path: $source_path
+            created_by: $created_by
         })
         RETURN id(snap) AS snap_node_id
         """
         snap_rec = tx.run(
             q_create_snapshot,
             snapshot_id=snapshot_id,
-            source_id=source_id,
-            entity_name=entity_name,
+            component=entity_name,
             timestamp=timestamp,
             created_by=created_by,
             source_path=source_path,
@@ -220,19 +205,21 @@ class MetadataAgent:
             raise RuntimeError("Failed to create Snapshot node")
         snap_node_id = snap_row["snap_node_id"]
 
-        # 4) Bulk-create SnapshotField nodes and link them to the Snapshot using UNWIND
-        # Prepare field list for UNWIND with JSON serialization for hints (hints_json)
+        # 3) Bulk-create SnapshotField nodes and link them to the Snapshot using UNWIND
         field_list = []
         for f in fields:
-            # ensure canonical shape/typing
             fname = f.get("name")
-            ftype = f.get("type")
+            ftype = f.get("type") or f.get("data_type")
             fnullable = bool(f.get("nullable")) if "nullable" in f else True
             forder = int(f.get("ordinal", 0)) if f.get("ordinal") is not None else 0
             fhints = f.get("hints", {}) or {}
             fhints_json = json.dumps(fhints) if fhints else None
+            
+            # Generate field ID based on snapshot_id, field name, and ordinal
+            field_id = f"{snapshot_id}|{fname}|{forder}"
+            
             field_list.append({
-                "field_uuid": str(uuid.uuid4()),
+                "field_id": field_id,
                 "name": fname,
                 "data_type": ftype,
                 "nullable": fnullable,
@@ -242,54 +229,46 @@ class MetadataAgent:
 
         fields_created = 0
         if field_list:
-            # UNWIND bulk insertion - MATCH the snapshot by id and create all fields linked to it
+            # Use HAS_FIELD relationship (not HAS_FIELD_COPY) to match new schema
             q_bulk = """
             MATCH (snap:Snapshot {id:$snapshot_id})
             UNWIND $field_list AS f
             CREATE (sf:SnapshotField {
-                id: f.field_uuid,
+                id: f.field_id,
                 name: f.name,
                 data_type: f.data_type,
                 nullable: f.nullable,
-                ordinal: f.ordinal,
-                hints_json: f.hints_json
+                ordinal: f.ordinal
             })
-            CREATE (snap)-[:HAS_FIELD_COPY]->(sf)
+            CREATE (snap)-[:HAS_FIELD]->(sf)
             RETURN count(sf) AS created_count
             """
             rec_bulk = tx.run(q_bulk, snapshot_id=snapshot_id, field_list=field_list)
             rrow = rec_bulk.single()
             if rrow:
                 fields_created = int(rrow["created_count"]) if rrow.get("created_count") is not None else 0
-            else:
-                fields_created = 0
 
-        # 5) Link Snapshot -> Entity and Snapshot -> previous snapshot if exists
-        tx.run(
-            "MATCH (snap:Snapshot {id:$snapshot_id}), (e:Entity {name:$entity_name}) MERGE (snap)-[:HAS_ENTITY]->(e)",
-            snapshot_id=snapshot_id,
-            entity_name=entity_name,
-        )
+        # 4) Link to previous snapshot if exists
         if previous_snapshot_id:
             tx.run(
-                "MATCH (snap:Snapshot {id:$snapshot_id}), (prev:Snapshot {id:$previous_snapshot_id}) MERGE (snap)-[:PREVIOUS_SNAPSHOT]->(prev)",
+                "MATCH (snap:Snapshot {id:$snapshot_id}), (prev:Snapshot {id:$previous_snapshot_id}) "
+                "MERGE (snap)-[:PREVIOUS_SNAPSHOT]->(prev)",
                 snapshot_id=snapshot_id,
                 previous_snapshot_id=previous_snapshot_id,
             )
 
-        # 6) Find impacted ETL jobs that use or produce this Entity (distinct)
-        q_jobs = """
-        MATCH (j:ETLJob)-[:USES_SOURCE|:PRODUCES]->(e:Entity {name: $entity_name})
-        RETURN DISTINCT j.job_id AS job_id
+        # 5) Find impacted IntegrationCatalog (pipelines) that cover this component
+        q_pipelines = """
+        MATCH (ic:IntegrationCatalog)-[:COVERS_COMPONENT]->(s:Snapshot {component: $component})
+        RETURN DISTINCT ic.pipeline AS pipeline
         """
-        jobs_cursor = tx.run(q_jobs, entity_name=entity_name)
-        impacted_jobs = [r["job_id"] for r in jobs_cursor]
+        pipelines_cursor = tx.run(q_pipelines, component=entity_name)
+        impacted_pipelines = [r["pipeline"] for r in pipelines_cursor]
 
         return {
             "previous_snapshot_id": previous_snapshot_id,
-            "impacted_jobs": impacted_jobs,
+            "impacted_pipelines": impacted_pipelines,
             "fields_created": fields_created,
-            "entity_node_id": entity_node_id,
             "snapshot_node_id": snap_node_id,
         }
 
@@ -313,15 +292,15 @@ if __name__ == "__main__":
                     {"name": "designation", "type": "string", "nullable": True, "ordinal": 4}
                 ],
                 "version_meta": {
-                    "created_by": "schema_drift_detector_agent",
-                    "timestamp": "2025-11-19T13:03:31.745777+00:00",
-                    "source_path": "../schema_drift_detector/examples/people-info.csv",
+                    "created_by": "snapshot_persistence_agent",
+                    "timestamp": "2025-11-22T11:45:00.000000+00:00",
+                    "source_path": "/Users/ayanbhattacharyya/Documents/ai-workspace/schema_drift_detector/schema_drift_detector/examples/people-info.csv",
                 },
             },
         },
     }
 
-    agent = MetadataAgent()
+    agent = SnapshotPersistenceAgent()
     try:
         out = agent.persist_snapshot(sample_payload)
         print(json.dumps(out, indent=2))
