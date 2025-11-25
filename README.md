@@ -425,6 +425,42 @@ uvicorn schema_drift_detector.api:app --host 0.0.0.0 --port 8000 --reload
 python -m schema_drift_detector.api
 ```
 
+# 1. Navigate to the project
+cd /Users/ayanbhattacharyya/Documents/ai-workspace/schema_drift_detector/schema_drift_detector
+
+# 2. Activate virtual environment
+source .venv/bin/activate
+
+# 3. Go to src directory
+cd src
+
+# 4. Start the server
+python -m uvicorn schema_drift_detector.api:app --host 0.0.0.0 --port 8000 --reload
+
+# 5. Stop the server
+pkill -9 uvicorn
+
+# 1. Deactivate current venv
+deactivate
+
+# 2. Navigate to the correct directory
+cd /Users/ayanbhattacharyya/Documents/ai-workspace/schema_drift_detector/schema_drift_detector
+
+# 3. Activate the CORRECT venv
+source .venv/bin/activate
+
+# 4. Verify it's correct (should show Python 3.11 and the inner .venv path)
+which python
+python --version
+
+# 5. Go to src directory
+cd src
+
+# 6. The server is ALREADY RUNNING (that's why you got "Address already in use")
+# Just open that terminal to see logs, or if you want to restart:
+# First stop the running one, then start fresh:
+python -m uvicorn schema_drift_detector.api:app --host 0.0.0.0 --port 8000
+
 The API will be available at:
 - Base URL: http://localhost:8000
 - Interactive Docs (Swagger UI): http://localhost:8000/docs
